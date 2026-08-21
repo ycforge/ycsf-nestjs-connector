@@ -56,6 +56,9 @@ npm run format:check
 npm run typecheck  # tsc --noEmit
 npm test           # jest
 npm run build      # emit dist/ with declarations
+npm run package:check
+# validate the packed tarball: publishable file set plus standalone
+# consumption through the public entry point only (runtime and type level)
 ```
 
 Pull requests must pass lint, format check, typecheck, tests and build; CI runs
