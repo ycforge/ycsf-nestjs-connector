@@ -18,3 +18,4 @@ coverage/
 
 # Local packaging output
 *.tgz
+.package-check/
