@@ -1,0 +1,7 @@
+# Keep the authoritative agent instructions byte-stable; do not reformat.
+AGENTS.md
+
+coverage/
+dist/
+node_modules/
+package-lock.json

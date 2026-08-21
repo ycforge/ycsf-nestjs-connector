@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output and coverage
+dist/
+coverage/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Logs, OS and editor artifacts
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Local packaging output
+*.tgz
