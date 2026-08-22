@@ -12,16 +12,18 @@ The package is intentionally a thin runtime/transport adapter: it must not turn
 NestJS into a Yandex-specific application framework. Business logic stays
 independent of Yandex Cloud whenever practical.
 
-> **Status: runtime bootstrap, execution context and the full HTTP transport
-> have landed.** The package architecture and public contracts are established
-> (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and
-> [`src/index.ts`](./src/index.ts)); the central function factory shipped with
-> issue #3, the normalized execution context with `@YandexContext()` injection
-> with issue #4, the Yandex API Gateway v2 HTTP request adapter (detection,
-> validation, normalization) with issue #5, and HTTP response/error mapping
-> plus controller dispatch with issue #6. The Message Queue transport (#7/#8)
-> is next. Observed Yandex Cloud runtime constraints that all connector code
-> must respect are catalogued in [AGENTS.md](./AGENTS.md).
+> **Status: runtime bootstrap, execution context, the full HTTP transport and
+> the Message Queue event adapter have landed.** The package architecture and
+> public contracts are established (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+> and [`src/index.ts`](./src/index.ts)); the central function factory shipped
+> with issue #3, the normalized execution context with `@YandexContext()`
+> injection with issue #4, the Yandex API Gateway v2 HTTP request adapter
+> (detection, validation, normalization) with issue #5, HTTP response/error
+> mapping plus controller dispatch with issue #6, and the Message Queue event
+> adapter (detection, validation, batch normalization) with issue #7. Queue
+> handler dispatch and decorators (#8) are next. Observed Yandex Cloud runtime
+> constraints that all connector code must respect are catalogued in
+> [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -82,10 +84,20 @@ header values (e.g. multiple `Set-Cookie`) surface under the optional
 Gateway payload-format-2.0 response path: the gateway accepts it, joins
 repeated ordinary headers with commas on the wire, and emits repeated
 `Set-Cookie` values as separate header lines (see `src/http/response.ts`).
-Message Queue support (#7/#8) is not landed yet; deliveries no transport
-claims reject with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT`.
-Environments requiring graceful teardown can call `handler.close()` to
-release the cached application; the next invocation cold-starts again.
+Message Queue deliveries are detected by the built-in registry as well
+(#7): events carrying the observed `messages[]` trigger shape are
+structurally validated, normalized into a batch of typed message envelopes
+(event metadata, queue id, message identity, verbatim system and user
+attributes, checksums, opaque raw body, untouched raw references) and
+published to the invocation scope. Queue handler dispatch over that batch,
+including `@QueueHandler()`/`@QueueMessage()`, lands with issue #8; until
+then a queue invocation resolves with its normalized batch. Failures —
+malformed deliveries as well as later handler errors — propagate out of the
+invocation so Message Queue retry/dead-letter configuration stays effective;
+deliveries no transport claims reject with `ConnectorError` code
+`UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
+`handler.close()` to release the cached application; the next invocation
+cold-starts again.
 
 ## Architecture
 

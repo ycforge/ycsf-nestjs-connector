@@ -203,11 +203,8 @@ Discriminators (**observed**):
 Adding a future transport means writing a new internal adapter module,
 extending the `TransportId` union in one place, and registering it in
 `src/core/transports.ts`'s ordered adapter list. The application layer does
-not change. The built-in registry currently contains the HTTP / API Gateway
-v2 adapter (#5); until issue #7 registers the Message Queue adapter, queue-shaped
-events fail with `UNKNOWN_INVOCATION_EVENT` — an honest rejection, never
-half-working behavior. Detection also precedes initialization: events nobody
-claims never trigger a Nest cold start.
+not change. Detection also precedes initialization: events nobody claims
+never trigger a Nest cold start.
 
 The registered HTTP adapter (`src/http/adapter.ts`) claims events whose
 `version === "2.0"` plus string `rawPath`/`rawQueryString` (**observed**
@@ -249,6 +246,24 @@ path-matching.ts`), audited against what `@nestjs/core` 11 can hand over:
   `{:id}`), wildcards outside the final segment, and non-string paths. A
   pattern outside the contract therefore fails cold start deterministically —
   never silently misroutes.
+
+The registered Message Queue adapter (`src/mq/adapter.ts`, issue #7) claims
+deliveries whose `messages` array is non-empty and whose elements carry the
+observed fingerprint — an object `event_metadata` plus `details.queue_id` and
+`details.message.message_id` (**observed**, DATA-ANALYSE.md section C).
+Near-miss shapes — including an empty `messages` array, which never occurred in
+51/51 captures — stay unclaimed and fail with `UNKNOWN_INVOCATION_EVENT`
+instead of being silently absorbed (AGENTS.md §8.3). Inside its dispatch the
+adapter validates every observed field of every delivered envelope (failures
+become `INVALID_INVOCATION_EVENT` with value-free diagnostics naming only
+field paths) and transforms the delivery into the normalized `QueueBatch`:
+one typed envelope per message with event metadata, queue id, message
+identity, verbatim system attributes, camelCase user attributes, checksums,
+the opaque raw body and untouched `raw` references throughout. The batch is
+published to the invocation scope (mirroring the HTTP request) and returned
+from the invocation; handler dispatch over it arrives with issue #8.
+Deliveries are normalized as a batch regardless of the current trigger's
+grouped-message limit of 1 (**observed**) — nothing hard-codes that limit.
 
 ## 5. Raw data preservation
 
