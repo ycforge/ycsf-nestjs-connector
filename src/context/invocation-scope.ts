@@ -1,15 +1,25 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { NormalizedHttpRequest } from "../http/normalized-request";
 import type { YandexExecutionContext } from "./yandex-execution-context";
 
 /**
  * Per-invocation state shared with everything that runs inside one handler
  * execution (issue #4).
  *
- * Deliberately minimal and extensible: transports add their normalized
- * models on top without changing how application code reads the context.
+ * Deliberately minimal and extensible: transports add their normalized models
+ * on top without changing how application code reads the context.
  */
 export interface InvocationScopeState {
   readonly executionContext: YandexExecutionContext;
+
+  /**
+   * Normalized HTTP request published by the claiming HTTP transport before
+   * user code runs (issue #5). Absent for non-HTTP invocations; application
+   * code reads it through {@link resolveInvocationHttpRequest}, mirroring how
+   * the execution context is resolved — never from module-level singletons
+   * (AGENTS.md section 11).
+   */
+  readonly httpRequest?: NormalizedHttpRequest;
 }
 
 /**
@@ -43,6 +53,29 @@ export function getInvocationScopeState(): InvocationScopeState | undefined {
 }
 
 /**
+ * Runs `operation` inside the current invocation's scope with additional
+ * per-invocation state merged in.
+ *
+ * Extension seam for transport dispatch (issue #5): the claiming transport
+ * publishes its normalized models after detection but before any user code
+ * runs. The store is replaced immutably, so concurrent invocations keep fully
+ * isolated views and nothing mutates behind readers' backs (AGENTS.md
+ * section 11).
+ */
+export function extendInvocationScope<TResult>(
+  extension: Partial<InvocationScopeState>,
+  operation: () => Promise<TResult>,
+): Promise<TResult> {
+  const current = invocationStorage.getStore();
+  if (!current) {
+    throw new Error(
+      "the invocation scope can only be extended while handling a Yandex Cloud Function invocation",
+    );
+  }
+  return invocationStorage.run({ ...current, ...extension }, operation);
+}
+
+/**
  * Resolves the current invocation's normalized execution context.
  *
  * Transport dispatch uses this to fill `@YandexContext()` parameters.
@@ -57,4 +90,21 @@ export function resolveInvocationExecutionContext(): YandexExecutionContext {
     );
   }
   return state.executionContext;
+}
+
+/**
+ * Resolves the current invocation's normalized HTTP request.
+ *
+ * Internal seam consumed by transport dispatch and specs; deliberately not
+ * part of the public export surface yet. Fails loudly outside an HTTP
+ * invocation instead of returning an undefined request typed as present.
+ */
+export function resolveInvocationHttpRequest(): NormalizedHttpRequest {
+  const state = invocationStorage.getStore();
+  if (!state?.httpRequest) {
+    throw new Error(
+      "no HTTP request is associated with the current invocation; only the HTTP / API Gateway transport publishes one",
+    );
+  }
+  return state.httpRequest;
 }

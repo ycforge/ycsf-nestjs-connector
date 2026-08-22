@@ -159,6 +159,10 @@ AsyncLocalStorage scope (`src/context/invocation-scope.ts`). Consequences:
 - `@YandexContext()` is a thin parameter registration; transports fill the
   registered parameters from the invocation scope when dispatching to user
   handlers (issues #5/#7/#8). Resolution outside an invocation fails loudly.
+- The scope state is the transports' extension slot: the claiming transport
+  adds its normalized per-invocation models (the HTTP request since issue #5)
+  immutably before dispatch, so concurrent invocations keep fully isolated
+  views (AGENTS.md §11).
 - The scope exists only for the duration of one handler invocation: concurrent
   invocations get isolated stores, sequential invocations never observe each
   other's state (AGENTS.md §11), and nothing survives after completion.
@@ -195,10 +199,18 @@ Discriminators (**observed**):
 Adding a future transport means writing a new internal adapter module,
 extending the `TransportId` union in one place, and registering it in
 `src/core/transports.ts`'s ordered adapter list. The application layer does
-not change. Until issues #5/#7 register their adapters there, the built-in
-registry is empty and every invocation fails with `UNKNOWN_INVOCATION_EVENT`
-— an honest rejection, never half-working behavior. Detection also precedes
-initialization: events nobody claims never trigger a Nest cold start.
+not change. The built-in registry currently contains the HTTP / API Gateway
+v2 adapter (#5); until issue #7 registers the Message Queue adapter, queue-shaped
+events fail with `UNKNOWN_INVOCATION_EVENT` — an honest rejection, never
+half-working behavior. Detection also precedes initialization: events nobody
+claims never trigger a Nest cold start.
+
+The registered HTTP adapter (`src/http/adapter.ts`) claims events whose
+`version === "2.0"` plus string `rawPath`/`rawQueryString` (**observed**
+discriminator), validates the full observed shape inside its dispatch, and
+publishes the normalized `NormalizedHttpRequest` into the invocation scope
+before user code runs; response mapping and controller dispatch are the
+response adapter's concern (issue #6).
 
 ## 5. Raw data preservation
 
