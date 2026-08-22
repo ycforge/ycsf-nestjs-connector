@@ -1,4 +1,4 @@
-import { Injectable, Module, type INestApplicationContext } from "@nestjs/common";
+import { Injectable, Module, type INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { resolveInvocationExecutionContext } from "../context/invocation-scope";
 import { YandexContext } from "../context/yandex-context.decorator";
@@ -194,7 +194,9 @@ describe("core invocation runtime lifecycle", () => {
 
   beforeEach(() => {
     probeInstanceCounter = 0;
-    createSpy = jest.spyOn(NestFactory, "createApplicationContext");
+    // Since issue #6 the runtime bootstraps over NestFactory.create with the
+    // connector's in-memory HTTP adapter (docs/ARCHITECTURE.md section 3.2).
+    createSpy = jest.spyOn(NestFactory, "create");
   });
 
   afterEach(async () => {
@@ -382,19 +384,21 @@ describe("core invocation runtime lifecycle", () => {
       const http = createFixedTransport("http", "api-gateway-v2", { handled: true });
       const runtime = makeRuntime([http]);
 
-      let releaseGate!: (application: INestApplicationContext) => void;
-      const gate = new Promise<INestApplicationContext>((resolveGate) => {
+      let releaseGate!: (application: INestApplication) => void;
+      const gate = new Promise<INestApplication>((resolveGate) => {
         releaseGate = resolveGate;
       });
       createSpy.mockImplementationOnce(() => gate);
 
       // Only close()/initialization are exercised on this gated path; a stub
-      // keeps the test independent of real bootstrap timing.
+      // keeps the test independent of real bootstrap timing. The core chains
+      // `init()` after create, so the stub exposes it as a no-op.
       const stubClose = jest.fn(() => Promise.resolve());
       const stubApplication = {
+        init: () => Promise.resolve(stubApplication),
         close: stubClose,
         resolve: () => Promise.reject(new Error("stub application resolves nothing")),
-      } as unknown as INestApplicationContext;
+      } as unknown as INestApplication;
 
       const inFlightInvocation = runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       const closing = runtime.close();
@@ -434,7 +438,19 @@ describe("core invocation runtime lifecycle", () => {
 
       const result = await handler(makeObservedHttpEvent(), makeRuntimeContext("inv-public-http"));
 
-      expect(result).toEqual({ statusCode: 200, headers: {}, body: "", isBase64Encoded: false });
+      // RootModule registers no controllers, so the dispatched request lands
+      // at the deterministic not-found layer (issue #6): a wire-valid,
+      // platform-shaped 404 envelope instead of an arbitrary payload.
+      expect(result).toEqual({
+        statusCode: 404,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          message: "Cannot GET /fixture",
+          error: "Not Found",
+          statusCode: 404,
+        }),
+        isBase64Encoded: false,
+      });
       expect(createSpy).toHaveBeenCalledTimes(1);
     });
   });

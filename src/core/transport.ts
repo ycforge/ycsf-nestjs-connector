@@ -9,6 +9,7 @@
  * the runtime that consumes them.
  */
 
+import type { INestApplication } from "@nestjs/common";
 import type { YandexExecutionContext } from "../context/yandex-execution-context";
 
 /** Stable discriminator ids. Extending this union is the single registration point for a new transport. */
@@ -34,9 +35,19 @@ export type YandexCloudFunctionHandler = (
  */
 export type InjectableToken<T = unknown> = (abstract new (...args: never[]) => T) | string | symbol;
 
-/** Read-only provider resolution over the warm NestJS application instance. */
+/**
+ * Read-only view over the warm NestJS application instance.
+ *
+ * Since issue #6 the runtime bootstraps one HTTP-bound application
+ * (`NestFactory.create` over the connector's in-memory adapter) instead of a
+ * standalone context: Message Queue transports resolve providers through it
+ * exactly as before, while the HTTP transport additionally reaches the
+ * registered routes via {@linkcode INestApplication.getHttpAdapter}.
+ */
 export interface InvocationContainer {
   resolve<T>(token: InjectableToken<T>): Promise<T>;
+  /** The warm application backing this invocation's container. */
+  getApplication(): INestApplication;
 }
 
 /** Per-invocation input handed to the transport that claimed an event. */

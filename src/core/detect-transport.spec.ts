@@ -25,6 +25,9 @@ interface FakeTransport extends TransportAdapter<FixtureEvent, string> {
 
 const UNUSED_CONTAINER: InvocationContainer = {
   resolve: () => Promise.reject(new Error("container resolution is not part of this scenario")),
+  getApplication: () => {
+    throw new Error("application access is not part of this scenario");
+  },
 };
 
 const FIXTURE_EXECUTION_CONTEXT: YandexExecutionContext = Object.freeze({
