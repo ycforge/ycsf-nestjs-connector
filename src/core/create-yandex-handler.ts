@@ -1,5 +1,7 @@
 import type { INestApplicationContext, Type } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import { buildYandexExecutionContext } from "../context/build-yandex-execution-context";
+import { runInInvocationScope } from "../context/invocation-scope";
 import { detectTransport } from "./detect-transport";
 import type {
   InjectableToken,
@@ -82,6 +84,12 @@ export function createInvocationRuntime(
 
     const application = await getApplication();
 
+    // Normalized once per invocation from the untouched payloads: every
+    // transport hands the identical context abstraction to user code, keeping
+    // correlation ids and trace metadata consistent across HTTP and Message
+    // Queue executions (issue #4).
+    const executionContext = buildYandexExecutionContext(rawEvent, rawContext);
+
     // Fresh per-invocation record: transports receive the untouched raw
     // event/context plus a container view over the warm application. Errors
     // from `invoke` propagate verbatim — HTTP and Message Queue own their
@@ -90,8 +98,13 @@ export function createInvocationRuntime(
       rawEvent,
       rawContext,
       container: createInvocationContainer(application),
+      executionContext,
     };
-    return transport.invoke(invocation);
+    // Dispatch runs inside this invocation's scope: everything reachable from
+    // the handler — including `@YandexContext()` parameter injection — reads
+    // exactly this invocation's context. Concurrent invocations get isolated
+    // stores and nothing survives the call (AGENTS.md section 11).
+    return runInInvocationScope({ executionContext }, () => transport.invoke(invocation));
   };
 
   return Object.assign(handler, {

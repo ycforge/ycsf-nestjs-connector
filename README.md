@@ -12,13 +12,14 @@ The package is intentionally a thin runtime/transport adapter: it must not turn
 NestJS into a Yandex-specific application framework. Business logic stays
 independent of Yandex Cloud whenever practical.
 
-> **Status: runtime bootstrap landed, transports in progress.** The package
-> architecture and public contracts are established (see
-> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and
+> **Status: runtime bootstrap and execution context landed, transports in
+> progress.** The package architecture and public contracts are established
+> (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and
 > [`src/index.ts`](./src/index.ts)); the central function factory ships with
-> issue #3 and transport behavior is implemented incrementally (HTTP #5/#6,
-> Message Queue #7/#8). Observed Yandex Cloud runtime constraints that all
-> connector code must respect are catalogued in [AGENTS.md](./AGENTS.md).
+> issue #3, the normalized execution context with `@YandexContext()` injection
+> ships with issue #4, and transport behavior is implemented incrementally
+> (HTTP #5/#6, Message Queue #7/#8). Observed Yandex Cloud runtime constraints
+> that all connector code must respect are catalogued in [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -32,6 +33,34 @@ const handler = createYandexHandler(AppModule);
 
 export default { handler };
 ```
+
+### Normalized execution context
+
+Handlers can access runtime metadata through `@YandexContext()` parameter
+injection instead of touching raw Yandex objects:
+
+```ts
+import { YandexContext } from "@ycforge/ycsf-nestjs-connector";
+import type { YandexExecutionContext } from "@ycforge/ycsf-nestjs-connector";
+
+@Injectable()
+export class OrdersService {
+  handle(@YandexContext() executionContext: YandexExecutionContext) {
+    // Stable per-invocation correlation id (identical for HTTP and MQ).
+    executionContext.awsRequestId;
+    // Trace metadata preserved verbatim.
+    executionContext.uberTraceId;
+    // Escape hatches: untouched raw event/context.
+    executionContext.rawEvent;
+    executionContext.raw;
+  }
+}
+```
+
+The context is scoped to a single invocation and never shared between them.
+Its IAM token (`executionContext.token`) is a secret: automatic serialization
+(`JSON.stringify`) redacts it to `REDACTED_TOKEN` and excludes the raw
+payloads, so accidental logging cannot leak credentials.
 
 Until the transport adapters land (#5–#8), no built-in transport claims events
 yet: invocations reject with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT`.
@@ -55,8 +84,8 @@ Source layout:
 | `src/core/`       | Mixed      | Transport SPI contracts; runtime internals (#3)   |
 | `src/http/`       | Mixed      | Public HTTP contracts; adapter behavior (#5, #6)  |
 | `src/mq/`         | Mixed      | Public queue contracts; adapter behavior (#7, #8) |
-| `src/context/`    | Public     | Normalized execution context contract             |
-| `src/decorators/` | Public     | Decorator signatures; implementations (#4, #8)    |
+| `src/context/`    | Mixed      | Context contract + decorator (#4); internals      |
+| `src/decorators/` | Public     | Decorator signatures; queue implementations (#8)  |
 
 Per-module visibility tiers and the explicit list of public exports are in
 [ARCHITECTURE.md §2 and §7](./docs/ARCHITECTURE.md#7-public-api-surface).

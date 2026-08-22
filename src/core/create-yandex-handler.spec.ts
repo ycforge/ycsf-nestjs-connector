@@ -1,16 +1,25 @@
 import { Injectable, Module, type INestApplicationContext } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import { resolveInvocationExecutionContext } from "../context/invocation-scope";
+import { YandexContext } from "../context/yandex-context.decorator";
+import type { YandexExecutionContext } from "../context/yandex-execution-context";
 import { ConnectorError } from "./connector-error";
 import {
   createInvocationRuntime,
   createYandexHandler,
   type ClosableYandexCloudFunctionHandler,
 } from "./create-yandex-handler";
-import type { TransportAdapter, TransportId, TransportInvocation } from "./transport";
+import type {
+  InvocationContainer,
+  TransportAdapter,
+  TransportId,
+  TransportInvocation,
+} from "./transport";
 
 /**
- * Lifecycle specs for the central runtime (issue #3). They bootstrap real
- * NestJS standalone application contexts and drive the full
+ * Lifecycle specs for the central runtime (issue #3) plus the
+ * invocation-scoped execution context integration specs (issue #4). They
+ * bootstrap real NestJS standalone application contexts and drive the full
  * detect -> init -> dispatch flow through the same code path the public
  * factory uses, with fixture transports standing in for the HTTP (#5) and
  * Message Queue (#7) adapters.
@@ -110,6 +119,23 @@ const QUEUE_EVENT: FixtureEvent = Object.freeze({
   messageId: "m1",
 });
 
+/**
+ * Observed-shaped runtime context fixture (DATA-ANALYSE.md section D): the
+ * lifecycle specs pass it as the raw second handler argument so every
+ * invocation carries a realistic platform context.
+ */
+function makeRuntimeContext(awsRequestId: string): Record<string, unknown> {
+  return {
+    awsRequestId,
+    functionName: "fn-fixture",
+    functionVersion: "$LATEST",
+    functionFolderId: "folder-fixture",
+    memoryLimitInMB: "1024",
+    deadlineMs: 1787328996791,
+    logGroupName: "",
+  };
+}
+
 async function capturedRejection(promise: Promise<unknown>): Promise<unknown> {
   try {
     await promise;
@@ -154,8 +180,8 @@ describe("core invocation runtime lifecycle", () => {
     const http = createResolvingTransport("http", "api-gateway-v2");
     const runtime = makeRuntime([http]);
 
-    const first = await runtime(HTTP_EVENT, { requestId: "inv-1" });
-    const second = await runtime(HTTP_EVENT, { requestId: "inv-2" });
+    const first = await runtime(HTTP_EVENT, makeRuntimeContext("inv-1"));
+    const second = await runtime(HTTP_EVENT, makeRuntimeContext("inv-2"));
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     // Deep-equal resolutions imply the identical singleton probe instance was
@@ -176,11 +202,11 @@ describe("core invocation runtime lifecycle", () => {
     // promise must yield one application instead of five duplicates
     // (AGENTS.md section 10.3).
     const resolutions = await Promise.all([
-      runtime(HTTP_EVENT, {}),
-      runtime(HTTP_EVENT, {}),
-      runtime(HTTP_EVENT, {}),
-      runtime(HTTP_EVENT, {}),
-      runtime(HTTP_EVENT, {}),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
     ]);
 
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -195,7 +221,11 @@ describe("core invocation runtime lifecycle", () => {
     const http = createResolvingTransport("http", "api-gateway-v2");
     const runtime = makeRuntime([http]);
 
-    const attempts = [runtime(HTTP_EVENT, {}), runtime(HTTP_EVENT, {}), runtime(HTTP_EVENT, {})];
+    const attempts = [
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+      runtime(HTTP_EVENT, makeRuntimeContext("inv-warm")),
+    ];
     for (const attempt of attempts) {
       await expect(attempt).rejects.toThrow("cold-start-boom");
     }
@@ -203,7 +233,7 @@ describe("core invocation runtime lifecycle", () => {
     // The failed cold start is not cached as a permanent failure: the next
     // invocation retries initialization from scratch.
     expect(createSpy).toHaveBeenCalledTimes(1);
-    await expect(runtime(HTTP_EVENT, {})).resolves.toBeDefined();
+    await expect(runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"))).resolves.toBeDefined();
     expect(createSpy).toHaveBeenCalledTimes(2);
   });
 
@@ -223,7 +253,7 @@ describe("core invocation runtime lifecycle", () => {
     };
     const runtime = makeRuntime([failing]);
 
-    await expect(runtime(HTTP_EVENT, {})).rejects.toBe(handlerFailure);
+    await expect(runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"))).rejects.toBe(handlerFailure);
   });
 
   it("routes every invocation to the transport claiming its event shape", async () => {
@@ -233,12 +263,14 @@ describe("core invocation runtime lifecycle", () => {
     });
     const runtime = makeRuntime([http, queue]);
 
-    await expect(runtime(HTTP_EVENT, {})).resolves.toEqual({
+    await expect(runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"))).resolves.toEqual({
       probeInstanceId: expect.any(Number),
       stringTokenValue: "string-token-value",
     });
-    await expect(runtime(QUEUE_EVENT, {})).resolves.toEqual({ acknowledged: true });
-    await expect(runtime(HTTP_EVENT, {})).resolves.toBeDefined();
+    await expect(runtime(QUEUE_EVENT, makeRuntimeContext("inv-queue"))).resolves.toEqual({
+      acknowledged: true,
+    });
+    await expect(runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"))).resolves.toBeDefined();
 
     expect(http.invocations).toHaveLength(2);
     expect(queue.invocations).toHaveLength(1);
@@ -252,8 +284,8 @@ describe("core invocation runtime lifecycle", () => {
     const http = createResolvingTransport("http", "api-gateway-v2");
     const runtime = makeRuntime([http]);
 
-    const contextOne = { requestId: "inv-1" };
-    const contextTwo = { requestId: "inv-2" };
+    const contextOne = makeRuntimeContext("inv-1");
+    const contextTwo = makeRuntimeContext("inv-2");
     await runtime(HTTP_EVENT, contextOne);
     await runtime(HTTP_EVENT, contextTwo);
 
@@ -285,12 +317,12 @@ describe("core invocation runtime lifecycle", () => {
       const http = createResolvingTransport("http", "api-gateway-v2");
       const runtime = makeRuntime([http]);
 
-      const warm = await runtime(HTTP_EVENT, {});
+      const warm = await runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       await runtime.close();
 
       // A fresh application yields a new probe singleton, so the resolution
       // differs from the pre-close warm value.
-      const afterClose = await runtime(HTTP_EVENT, {});
+      const afterClose = await runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       expect(createSpy).toHaveBeenCalledTimes(2);
       expect(afterClose).not.toEqual(warm);
     });
@@ -308,7 +340,7 @@ describe("core invocation runtime lifecycle", () => {
       const http = createResolvingTransport("http", "api-gateway-v2");
       const runtime = makeRuntime([http]);
 
-      await runtime(HTTP_EVENT, {});
+      await runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       await runtime.close();
 
       await expect(runtime.close()).resolves.toBeUndefined();
@@ -336,7 +368,7 @@ describe("core invocation runtime lifecycle", () => {
         resolve: () => Promise.reject(new Error("stub application resolves nothing")),
       } as unknown as INestApplicationContext;
 
-      const inFlightInvocation = runtime(HTTP_EVENT, {});
+      const inFlightInvocation = runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       const closing = runtime.close();
       releaseGate(stubApplication);
 
@@ -347,7 +379,7 @@ describe("core invocation runtime lifecycle", () => {
       expect(stubClose).toHaveBeenCalledTimes(1);
 
       // The released environment cold-starts again on demand.
-      await runtime(HTTP_EVENT, {});
+      await runtime(HTTP_EVENT, makeRuntimeContext("inv-warm"));
       expect(createSpy).toHaveBeenCalledTimes(2);
     });
   });
@@ -361,9 +393,184 @@ describe("core invocation runtime lifecycle", () => {
       // core's ordered registry, no transport claims any event — the shipped
       // contract is a clear UNKNOWN_INVOCATION_EVENT failure, never
       // half-working behavior.
-      const failure = await capturedRejection(handler(HTTP_EVENT, {}));
+      const failure = await capturedRejection(
+        handler(HTTP_EVENT, makeRuntimeContext("inv-public")),
+      );
       expectConnectorErrorCode(failure, "UNKNOWN_INVOCATION_EVENT");
       expect(createSpy).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Integration specs for the normalized execution context (issue #4): they
+ * drive `@YandexContext()` injection end-to-end through both fixture
+ * transports exactly the way the real adapters (#5, #7/#8) will dispatch —
+ * resolve the provider from the invocation container, discover decorated
+ * parameters, then call the method with the context resolved from the
+ * invocation scope.
+ */
+
+class ContextCapturingHandler {
+  readonly captured: YandexExecutionContext[] = [];
+
+  capture(executionContext: YandexExecutionContext): YandexExecutionContext {
+    this.captured.push(executionContext);
+    return executionContext;
+  }
+}
+Injectable()(ContextCapturingHandler);
+YandexContext()(ContextCapturingHandler.prototype, "capture", 0);
+
+class ContextModule {}
+Module({ providers: [ContextCapturingHandler] })(ContextModule);
+
+/** Transport-agnostic dispatch: fills @YandexContext() parameters from scope. */
+function invokeCapturingHandler(container: InvocationContainer): Promise<YandexExecutionContext> {
+  return container
+    .resolve(ContextCapturingHandler)
+    .then((capturer) => capturer.capture(resolveInvocationExecutionContext()));
+}
+
+/** Fixture transport whose dispatch honors @YandexContext() like the real adapters. */
+function createContextTransport(id: TransportId, claimedKind: string): TransportAdapter {
+  return {
+    id,
+    supports(rawEvent): rawEvent is FixtureEvent {
+      return (
+        typeof rawEvent === "object" &&
+        rawEvent !== null &&
+        "kind" in rawEvent &&
+        (rawEvent as FixtureEvent).kind === claimedKind
+      );
+    },
+    invoke(invocation) {
+      return invokeCapturingHandler(invocation.container);
+    },
+  };
+}
+
+const HTTP_RUNTIME_CONTEXT = {
+  awsRequestId: "11111111-2222-4333-8444-555555555555",
+  functionName: "fn-http-fixture",
+  functionVersion: "$LATEST",
+  functionFolderId: "folder-fixture",
+  memoryLimitInMB: "1024",
+  deadlineMs: 1787328996791,
+  logGroupName: "",
+};
+
+const QUEUE_RUNTIME_CONTEXT = {
+  ...HTTP_RUNTIME_CONTEXT,
+  awsRequestId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+};
+
+describe("invocation-scoped execution context integration", () => {
+  const runtimes: ClosableYandexCloudFunctionHandler[] = [];
+
+  function makeRuntime(
+    transports: readonly TransportAdapter[],
+  ): ClosableYandexCloudFunctionHandler {
+    const runtime = createInvocationRuntime(ContextModule, transports);
+    runtimes.push(runtime);
+    return runtime;
+  }
+
+  afterEach(async () => {
+    while (runtimes.length > 0) {
+      await runtimes.pop()?.close();
+    }
+  });
+
+  it("injects the normalized context through both the HTTP and Message Queue paths", async () => {
+    const http = createContextTransport("http", "api-gateway-v2");
+    const queue = createContextTransport("message-queue", "message-queue-trigger");
+    const runtime = makeRuntime([http, queue]);
+
+    const viaHttp = (await runtime(HTTP_EVENT, HTTP_RUNTIME_CONTEXT)) as YandexExecutionContext;
+    const viaQueue = (await runtime(QUEUE_EVENT, QUEUE_RUNTIME_CONTEXT)) as YandexExecutionContext;
+
+    // Identical abstraction on both paths; each invocation carries its own
+    // correlation id (acceptance criteria of issue #4).
+    expect(viaHttp.awsRequestId).toBe("11111111-2222-4333-8444-555555555555");
+    expect(viaHttp.memoryLimitInMB).toBe("1024");
+    expect(viaQueue.awsRequestId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    expect(viaQueue).not.toBe(viaHttp);
+  });
+
+  it("hands transports and user code one shared normalized context per invocation", async () => {
+    let seenInvocation: TransportInvocation | undefined;
+    const observing: TransportAdapter = {
+      id: "http",
+      supports(rawEvent): rawEvent is FixtureEvent {
+        return (
+          typeof rawEvent === "object" &&
+          rawEvent !== null &&
+          "kind" in rawEvent &&
+          (rawEvent as FixtureEvent).kind === "api-gateway-v2"
+        );
+      },
+      invoke(invocation) {
+        seenInvocation = invocation;
+        return invokeCapturingHandler(invocation.container);
+      },
+    };
+    const runtime = makeRuntime([observing]);
+
+    const rawEvent = { kind: "api-gateway-v2" };
+    const injected = (await runtime(rawEvent, HTTP_RUNTIME_CONTEXT)) as YandexExecutionContext;
+
+    // Built once by the core from the untouched pair...
+    expect(seenInvocation?.executionContext).toBe(injected);
+    expect(injected.rawEvent).toBe(rawEvent);
+    expect(injected.raw).toBe(HTTP_RUNTIME_CONTEXT);
+    // ...and resolved as the exact same instance for user code.
+    expect(seenInvocation).toBeDefined();
+  });
+
+  it("leaks nothing of invocation N into invocation N+1", async () => {
+    const http = createContextTransport("http", "api-gateway-v2");
+    const runtime = makeRuntime([http]);
+
+    const first = (await runtime(HTTP_EVENT, HTTP_RUNTIME_CONTEXT)) as YandexExecutionContext;
+    const second = (await runtime(HTTP_EVENT, QUEUE_RUNTIME_CONTEXT)) as YandexExecutionContext;
+
+    // Sequential warm invocations must observe strictly their own context
+    // (AGENTS.md section 11).
+    expect(first.awsRequestId).toBe("11111111-2222-4333-8444-555555555555");
+    expect(second.awsRequestId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    expect(second).not.toBe(first);
+  });
+
+  it("isolates concurrent invocations racing the same cold start", async () => {
+    const http = createContextTransport("http", "api-gateway-v2");
+    const runtime = makeRuntime([http]);
+
+    const results = (await Promise.all([
+      runtime(HTTP_EVENT, { ...HTTP_RUNTIME_CONTEXT, awsRequestId: "concurrent-1" }),
+      runtime(HTTP_EVENT, { ...HTTP_RUNTIME_CONTEXT, awsRequestId: "concurrent-2" }),
+      runtime(HTTP_EVENT, { ...HTTP_RUNTIME_CONTEXT, awsRequestId: "concurrent-3" }),
+    ])) as YandexExecutionContext[];
+
+    expect(results.map((context) => context.awsRequestId).sort()).toEqual([
+      "concurrent-1",
+      "concurrent-2",
+      "concurrent-3",
+    ]);
+  });
+
+  it("fails an invocation loudly when the runtime context violates its observed shape", async () => {
+    const http = createContextTransport("http", "api-gateway-v2");
+    const runtime = makeRuntime([http]);
+
+    // memoryLimitInMB must stay a string (observed); a numeric value must
+    // fail value-free instead of flowing a coerced type into user code
+    // (AGENTS.md section 5).
+    const malformed = { ...HTTP_RUNTIME_CONTEXT, memoryLimitInMB: 1024 };
+    const failure = await capturedRejection(runtime(HTTP_EVENT, malformed));
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('expected field "memoryLimitInMB" to be a string');
+    expect((failure as Error).message).not.toContain("1024");
   });
 });

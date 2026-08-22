@@ -51,7 +51,8 @@ export type {
 // Normalized execution context.
 export type { YandexExecutionContext } from "./context/yandex-execution-context";
 
-// Decorator signatures (implementations arrive with issues #4 and #8).
+// Decorators (queue decorators arrive with issue #8).
+export { YandexContext } from "./context/yandex-context.decorator";
 export type {
   ContextParameterDecorator,
   QueueHandlerMethodDecorator,
