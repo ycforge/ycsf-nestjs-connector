@@ -1,12 +1,13 @@
 import { extendInvocationScope } from "../context/invocation-scope";
 import type { TransportAdapter, TransportId, TransportInvocation } from "../core/transport";
+import { dispatchQueueHandlers, discoverQueueHandlers } from "./dispatch";
 import type { QueueBatch } from "./message";
 import { normalizeQueueBatch } from "./normalize-batch";
 import type { RawQueueEvent } from "./raw-event";
 import { validateQueueEvent } from "./validate-raw-event";
 
 /**
- * Yandex Cloud Functions Message Queue trigger transport (issue #7).
+ * Yandex Cloud Functions Message Queue trigger transport (issues #7, #8).
  *
  * Detection discriminator (**observed**, docs/ARCHITECTURE.md section 4):
  * a non-empty `messages` array whose elements carry the observed trigger
@@ -52,9 +53,18 @@ export const messageQueueTransport: TransportAdapter<RawQueueEvent, QueueBatch> 
     // user code runs: queue code reached through the warm container can then
     // read the typed batch plus the execution context injected by the core
     // (@YandexContext()), isolated per invocation (AGENTS.md section 11).
-    // Issue #8 wires @QueueHandler()/@QueueMessage() dispatch on top of this
-    // seam; until then the batch is both the scope payload and the result.
-    return extendInvocationScope({ queueBatch: batch }, async () => batch);
+    // Handler dispatch (issue #8) runs INSIDE this same scope: discovery is a
+    // one-time static walk of the warm container, execution resolves handler
+    // instances per invocation and publishes each message as an immutable
+    // scope extension, and failures propagate verbatim — never converted to
+    // HTTP-like results — so Message Queue retry/dead-letter behavior stays
+    // effective. The untouched batch remains the deterministic transport
+    // result of a successful delivery.
+    return extendInvocationScope({ queueBatch: batch }, async () => {
+      const handlers = discoverQueueHandlers(invocation.container.getApplication());
+      await dispatchQueueHandlers(invocation.container, handlers, batch);
+      return batch;
+    });
   },
 };
 

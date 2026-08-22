@@ -77,4 +77,19 @@ export class ConnectorError extends Error {
       `unsupported route path pattern "${pattern}"${suffix}`,
     );
   }
+
+  /**
+   * A Message Queue delivery reached an application without any
+   * `@QueueHandler()` registration (issue #8). Failing loudly keeps the
+   * delivery visible to Message Queue retry/dead-letter configuration
+   * instead of acknowledging messages nobody consumed (AGENTS.md section
+   * 8.3); the event itself was valid, so this is deliberately not an
+   * invocation-event error.
+   */
+  static noQueueHandler(): ConnectorError {
+    return new ConnectorError(
+      { code: "NO_QUEUE_HANDLER", transportId: "message-queue" },
+      "the Message Queue transport claimed the delivery but no @QueueHandler() method is registered in the application",
+    );
+  }
 }

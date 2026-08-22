@@ -33,8 +33,14 @@ const FORBIDDEN_NAME_PATTERN = /(^|\/)([^/]*\bspec\b|\btest[^/]*|\.env[^/]*|auth
 
 // Mirrors src/index.spec.ts: the runtime surface grows only deliberately
 // (docs/ARCHITECTURE.md section 7); issue #3 added the bootstrap, issue #4
-// the context decorator.
-const EXPECTED_RUNTIME_EXPORTS = ["ConnectorError", "createYandexHandler", "YandexContext"];
+// the context decorator, issue #8 the queue decorators.
+const EXPECTED_RUNTIME_EXPORTS = [
+  "ConnectorError",
+  "QueueHandler",
+  "QueueMessage",
+  "YandexContext",
+  "createYandexHandler",
+];
 const FORBIDDEN_DEEP_IMPORTS = [
   "@ycforge/ycsf-nestjs-connector/dist/core/transport",
   "@ycforge/ycsf-nestjs-connector/dist/http/raw-event",
@@ -153,6 +159,14 @@ if (typeof entry.YandexContext !== "function") {
   console.error("YandexContext must be a decorator factory function");
   process.exit(1);
 }
+if (typeof entry.QueueHandler !== "function") {
+  console.error("QueueHandler must be a decorator factory function");
+  process.exit(1);
+}
+if (typeof entry.QueueMessage !== "function") {
+  console.error("QueueMessage must be a decorator factory function");
+  process.exit(1);
+}
 const probeHandler = entry.createYandexHandler(class AppModule {});
 if (typeof probeHandler !== "function" || typeof probeHandler.close !== "function") {
   console.error("createYandexHandler must return an invocable handler with close()");
@@ -197,7 +211,7 @@ function runPositiveTypeCheck(consumerDir) {
   writeFileSync(
     path.join(consumerDir, "consumer-positive.ts"),
     [
-      'import { ConnectorError, createYandexHandler, YandexContext } from "@ycforge/ycsf-nestjs-connector";',
+      'import { ConnectorError, createYandexHandler, QueueHandler, QueueMessage, YandexContext } from "@ycforge/ycsf-nestjs-connector";',
       "import type {",
       "  ConnectorErrorCode,",
       "  ClosableYandexCloudFunctionHandler,",
@@ -257,6 +271,17 @@ function runPositiveTypeCheck(consumerDir) {
       "}",
       "const consumer = new ContextConsumer();",
       'YandexContext()(consumer, "handle", 0);',
+      "",
+      "// Issue #8 surface: the merged QueueMessage export must work in both",
+      "// positions (decorator factory and normalized message type).",
+      "class QueueConsumer {",
+      "  consume(message: QueueMessage): string {",
+      "    return message.messageId;",
+      "  }",
+      "}",
+      "const queueConsumer = new QueueConsumer();",
+      'QueueHandler()(queueConsumer, "consume", Object.getOwnPropertyDescriptor(QueueConsumer.prototype, "consume")!);',
+      'QueueMessage()(queueConsumer, "consume", 0);',
       "",
       "// Runtime exports added by issue #3 must stay consumable through the",
       "// packaged declarations, including the closable handler shape.",

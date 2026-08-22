@@ -4,13 +4,14 @@ import {
   resolveInvocationExecutionContext,
   resolveInvocationHttpRequest,
   resolveInvocationQueueBatch,
+  resolveInvocationQueueMessage,
   runInInvocationScope,
   type InvocationScopeState,
 } from "./invocation-scope";
 import { buildYandexExecutionContext } from "./build-yandex-execution-context";
 import type { NormalizedHttpRequest } from "../http/normalized-request";
 import type { RawHttpApiGatewayV2Event } from "../http/raw-event";
-import type { QueueBatch } from "../mq/message";
+import type { QueueBatch, QueueMessage } from "../mq/message";
 
 /**
  * Specs for invocation-scoped context propagation (issue #4). AsyncLocalStorage
@@ -260,6 +261,101 @@ describe("invocation scope queue delivery extension", () => {
   it("refuses to resolve a queue delivery outside any invocation", () => {
     expect(() => resolveInvocationQueueBatch()).toThrow(
       /no Message Queue delivery is associated with the current invocation/,
+    );
+  });
+});
+
+describe("invocation scope per-message extension", () => {
+  const QUEUE_MESSAGE: QueueMessage = Object.freeze({
+    raw: Object.freeze({
+      event_metadata: {
+        event_id: "7f3a-c91d2e4b6a83405fb1d09c7-52d4e8",
+        event_type: "yandex.cloud.events.messagequeue.QueueMessage",
+        created_at: "2026-08-21T21:44:34.266Z",
+        tracing_context: null,
+        cloud_id: "a1b2c3d4000000000000",
+        folder_id: "e5f6a7b8000000000000",
+      },
+      details: {
+        queue_id: "yrn:yc:ymq:ru-central1:b1g00000000000000000:f-test",
+        message: {
+          message_id: "7f3a-c91d2e4b6a83405fb1d09c7-52d4e8",
+          md5_of_body: "9e107d9d372bb6826bd81d3542a419d6",
+          body: '{"fixture":true}',
+          attributes: {},
+          message_attributes: {},
+          md5_of_message_attributes: "",
+        },
+      },
+    }),
+    messageId: "7f3a-c91d2e4b6a83405fb1d09c7-52d4e8",
+    md5OfBody: "9e107d9d372bb6826bd81d3542a419d6",
+    body: '{"fixture":true}',
+    attributes: Object.freeze({}),
+    messageAttributes: Object.freeze({}),
+    md5OfMessageAttributes: "",
+    queueId: "yrn:yc:ymq:ru-central1:b1g00000000000000000:f-test",
+    eventMetadata: Object.freeze({
+      eventId: "7f3a-c91d2e4b6a83405fb1d09c7-52d4e8",
+      eventType: "yandex.cloud.events.messagequeue.QueueMessage",
+      createdAt: "2026-08-21T21:44:34.266Z",
+      tracingContext: null,
+      cloudId: "a1b2c3d4000000000000",
+      folderId: "e5f6a7b8000000000000",
+    }),
+  });
+
+  it("publishes exactly one message at a time while keeping the delivery and context", async () => {
+    const state = stateFor("inv-message");
+
+    await runInInvocationScope(state, async () => {
+      await extendInvocationScope({ queueMessage: QUEUE_MESSAGE }, async () => {
+        expect(resolveInvocationQueueMessage()).toBe(QUEUE_MESSAGE);
+        // Batch and execution context survive the per-message extension
+        // untouched and by reference.
+        expect(getInvocationScopeState()?.queueBatch).toBeUndefined();
+        expect(resolveInvocationExecutionContext()).toBe(state.executionContext);
+      });
+    });
+  });
+
+  it("does not leak a message beyond its handler call", async () => {
+    await runInInvocationScope(stateFor("inv-between-messages"), async () => {
+      await extendInvocationScope({ queueMessage: QUEUE_MESSAGE }, () => Promise.resolve());
+
+      // Between two messages of one delivery there is no current message.
+      expect(() => resolveInvocationQueueMessage()).toThrow(/no Message Queue message/);
+      expect(getInvocationScopeState()?.queueMessage).toBeUndefined();
+    });
+  });
+
+  it("isolates concurrent messages interleaving on the same event loop", async () => {
+    const slowMessage = { ...QUEUE_MESSAGE, messageId: "msg-slow" } as QueueMessage;
+    const fastMessage = { ...QUEUE_MESSAGE, messageId: "msg-fast" } as QueueMessage;
+    const observedDuringSlow: string[] = [];
+
+    await runInInvocationScope(stateFor("inv-messages-parent"), async () => {
+      const slowRun = extendInvocationScope({ queueMessage: slowMessage }, async () => {
+        await delay(20);
+        observedDuringSlow.push(resolveInvocationQueueMessage().messageId);
+      });
+      const fastRun = extendInvocationScope({ queueMessage: fastMessage }, async () => {
+        await delay(1);
+        observedDuringSlow.push(resolveInvocationQueueMessage().messageId);
+      });
+
+      // The parent scope never observes either child's message.
+      expect(() => resolveInvocationQueueMessage()).toThrow(/no Message Queue message/);
+
+      await Promise.all([slowRun, fastRun]);
+    });
+
+    expect(observedDuringSlow).toEqual(["msg-fast", "msg-slow"]);
+  });
+
+  it("refuses to resolve a message outside any handler execution", () => {
+    expect(() => resolveInvocationQueueMessage()).toThrow(
+      /no Message Queue message is associated with the current execution/,
     );
   });
 });

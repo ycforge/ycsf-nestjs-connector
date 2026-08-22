@@ -77,6 +77,9 @@ Visibility tiers:
 | `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                  |
 | `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)         |
 | `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts                     |
+| `src/mq/queue-handler.decorator.ts`             | Public     | `@QueueHandler()` method registration (#8)                   |
+| `src/mq/queue-message.decorator.ts`             | Public     | `@QueueMessage()` registration + merged message type (#8)    |
+| `src/mq/dispatch.ts`                            | Internal   | Queue handler discovery + per-message fan-out dispatch (#8)  |
 | `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                  |
 | `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)            |
 | `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                  |
@@ -164,9 +167,11 @@ AsyncLocalStorage scope (`src/context/invocation-scope.ts`). Consequences:
   registered parameters from the invocation scope when dispatching to user
   handlers (issues #5/#7/#8). Resolution outside an invocation fails loudly.
 - The scope state is the transports' extension slot: the claiming transport
-  adds its normalized per-invocation models (the HTTP request since issue #5)
-  immutably before dispatch, so concurrent invocations keep fully isolated
-  views (AGENTS.md §11).
+  adds its normalized per-invocation models (the HTTP request since issue #5,
+  the queue batch since issue #7) immutably before dispatch, and queue
+  dispatch nests one further immutable extension carrying exactly the message
+  a handler round is processing (issue #8), so concurrent invocations keep
+  fully isolated views (AGENTS.md §11).
 - The scope exists only for the duration of one handler invocation: concurrent
   invocations get isolated stores, sequential invocations never observe each
   other's state (AGENTS.md §11), and nothing survives after completion.
@@ -260,10 +265,22 @@ field paths) and transforms the delivery into the normalized `QueueBatch`:
 one typed envelope per message with event metadata, queue id, message
 identity, verbatim system attributes, camelCase user attributes, checksums,
 the opaque raw body and untouched `raw` references throughout. The batch is
-published to the invocation scope (mirroring the HTTP request) and returned
-from the invocation; handler dispatch over it arrives with issue #8.
-Deliveries are normalized as a batch regardless of the current trigger's
-grouped-message limit of 1 (**observed**) — nothing hard-codes that limit.
+published to the invocation scope (mirroring the HTTP request) and handed to
+queue handler dispatch (issue #8): discovery walks the warm application
+container once per application for methods marked `@QueueHandler()` — modules
+in insertion order, controllers before providers within each module,
+registrations deduplicated across the module surfaces shared providers appear
+under, result cached per application like recorded route layers — then every
+discovered handler receives EVERY delivered message, sequentially in delivery
+order, each round inside an immutable scope extension carrying exactly that
+message (`@QueueMessage()` resolves per message while `@YandexContext()`
+keeps resolving the invocation context). Handler instances resolve through
+the invocation's container view, so DEFAULT/REQUEST/TRANSIENT provider scopes
+behave exactly as on any other platform. Handler return values are ignored —
+a queue delivery has no response envelope — and successful dispatch returns
+the normalized batch unchanged. Deliveries are normalized as a batch
+regardless of the current trigger's grouped-message limit of 1 (**observed**)
+— nothing hard-codes that limit.
 
 ## 5. Raw data preservation
 
@@ -343,19 +360,25 @@ async semantics.
   surface as a failed invocation so Message Queue retry / dead-letter
   configuration remains effective. Acknowledgement/retry policy knobs are
   introduced by issue #10 if ever needed.
-- Partial-batch failures fail the whole invocation unless a deliberate,
-  documented acknowledgement policy says otherwise; the domain model stays
-  batch-capable regardless of the current grouped-message limit of `1`
-  (**observed**, AGENTS.md §4.6).
+- Batch iteration is fail-fast and sequential: the first handler failure
+  rejects the whole invocation immediately, and messages after the failing one
+  are never attempted — the domain model stays batch-capable regardless of the
+  current grouped-message limit of `1` (**observed**, AGENTS.md §4.6), but no
+  acknowledgement policy is implied beyond "the invocation failed".
+- A claimed delivery with no registered `@QueueHandler()` fails with
+  `NO_QUEUE_HANDLER` instead of succeeding silently: nobody consumed the
+  message, so retry/dead-letter configuration must observe it (AGENTS.md
+  §8.3).
 
 ### 6.3 Boundary errors
 
-Two error codes are reserved at the runtime boundary (`src/core/errors.ts`):
+Three error codes are reserved at the runtime boundary (`src/core/errors.ts`):
 
-| Code                       | Meaning                                                        |
-| -------------------------- | -------------------------------------------------------------- |
-| `UNKNOWN_INVOCATION_EVENT` | No transport claimed the event (diagnostic, non-secret detail) |
-| `INVALID_INVOCATION_EVENT` | A claiming transport failed deeper structural validation       |
+| Code                       | Meaning                                                                             |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `UNKNOWN_INVOCATION_EVENT` | No transport claimed the event (diagnostic, non-secret detail)                      |
+| `INVALID_INVOCATION_EVENT` | A claiming transport failed deeper structural validation                            |
+| `NO_QUEUE_HANDLER`         | The Message Queue transport claimed a delivery but no `@QueueHandler()` exists (#8) |
 
 Concrete error classes: `ConnectorError` (issue #3) implements both codes and
 is thrown at the detection boundary; transports raise
@@ -369,34 +392,29 @@ Explicit list. Everything not listed here is internal.
 
 Defined now (exported from `src/index.ts`):
 
-| Export                                                                                       | Kind  | Purpose                                              |
-| -------------------------------------------------------------------------------------------- | ----- | ---------------------------------------------------- |
-| `createYandexHandler`                                                                        | value | Central entry point: module -> function handler (#3) |
-| `ClosableYandexCloudFunctionHandler`                                                         | type  | Handler plus `close()` teardown hook (#3)            |
-| `ConnectorError`                                                                             | value | Boundary error carrying the taxonomy codes (#3)      |
-| `YandexCloudFunctionHandler`                                                                 | type  | Signature the function runtime calls                 |
-| `TransportAdapter`                                                                           | type  | SPI each transport implements                        |
-| `TransportInvocation`                                                                        | type  | Per-invocation input handed to a transport           |
-| `TransportId`                                                                                | type  | Stable transport discriminator ids                   |
-| `InvocationContainer`                                                                        | type  | Read-only provider resolution over warm app          |
-| `InjectableToken`                                                                            | type  | Token accepted by `InvocationContainer`              |
-| `HasRaw`                                                                                     | type  | Raw-preservation mixin                               |
-| `ConnectorErrorCode`                                                                         | type  | Reserved boundary error codes                        |
-| `RawHttpApiGatewayV2Event` (+ context types)                                                 | type  | Observed raw HTTP event                              |
-| `NormalizedHttpRequest`                                                                      | type  | Canonical normalized request                         |
-| `YandexFunctionHttpResponse`                                                                 | type  | Response envelope returned to the runtime            |
-| `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type  | Observed raw MQ event                                |
-| `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type  | Normalized MQ models                                 |
-| `YandexExecutionContext`                                                                     | type  | Normalized execution context (**observed**)          |
-| `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type  | Decorator signatures                                 |
-| `YandexContext()`                                                                            | value | Parameter injection of the normalized context (#4)   |
-
-Planned runtime exports (implemented by their owning issues; adding them must
-not change these contracts):
-
-| Export                               | Issue |
-| ------------------------------------ | ----- |
-| `@QueueHandler()`, `@QueueMessage()` | #8    |
+| Export                                                                                       | Kind  | Purpose                                                                                                     |
+| -------------------------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------- |
+| `createYandexHandler`                                                                        | value | Central entry point: module -> function handler (#3)                                                        |
+| `ClosableYandexCloudFunctionHandler`                                                         | type  | Handler plus `close()` teardown hook (#3)                                                                   |
+| `ConnectorError`                                                                             | value | Boundary error carrying the taxonomy codes (#3)                                                             |
+| `YandexCloudFunctionHandler`                                                                 | type  | Signature the function runtime calls                                                                        |
+| `TransportAdapter`                                                                           | type  | SPI each transport implements                                                                               |
+| `TransportInvocation`                                                                        | type  | Per-invocation input handed to a transport                                                                  |
+| `TransportId`                                                                                | type  | Stable transport discriminator ids                                                                          |
+| `InvocationContainer`                                                                        | type  | Read-only provider resolution over warm app                                                                 |
+| `InjectableToken`                                                                            | type  | Token accepted by `InvocationContainer`                                                                     |
+| `HasRaw`                                                                                     | type  | Raw-preservation mixin                                                                                      |
+| `ConnectorErrorCode`                                                                         | type  | Reserved boundary error codes                                                                               |
+| `RawHttpApiGatewayV2Event` (+ context types)                                                 | type  | Observed raw HTTP event                                                                                     |
+| `NormalizedHttpRequest`                                                                      | type  | Canonical normalized request                                                                                |
+| `YandexFunctionHttpResponse`                                                                 | type  | Response envelope returned to the runtime                                                                   |
+| `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type  | Observed raw MQ event                                                                                       |
+| `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type  | Normalized MQ models                                                                                        |
+| `YandexExecutionContext`                                                                     | type  | Normalized execution context (**observed**)                                                                 |
+| `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type  | Decorator signatures                                                                                        |
+| `YandexContext()`                                                                            | value | Parameter injection of the normalized context (#4)                                                          |
+| `QueueHandler()`                                                                             | value | Marks provider/controller methods as Message Queue consumers (#8)                                           |
+| `QueueMessage()` (+ type)                                                                    | value | Parameter injection of the current queue message; the same name also names the normalized message type (#8) |
 
 The runtime value exports are pinned in two places that must stay in sync with
 this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
