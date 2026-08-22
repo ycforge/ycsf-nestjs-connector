@@ -12,16 +12,16 @@ The package is intentionally a thin runtime/transport adapter: it must not turn
 NestJS into a Yandex-specific application framework. Business logic stays
 independent of Yandex Cloud whenever practical.
 
-> **Status: runtime bootstrap, execution context and the HTTP request adapter
+> **Status: runtime bootstrap, execution context and the full HTTP transport
 > have landed.** The package architecture and public contracts are established
 > (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and
 > [`src/index.ts`](./src/index.ts)); the central function factory shipped with
 > issue #3, the normalized execution context with `@YandexContext()` injection
-> with issue #4, and the Yandex API Gateway v2 HTTP request adapter (detection,
-> validation, normalization) with issue #5. Response/error mapping for HTTP
-> (#6) and the Message Queue transport (#7/#8) are next. Observed Yandex Cloud
-> runtime constraints that all connector code must respect are catalogued in
-> [AGENTS.md](./AGENTS.md).
+> with issue #4, the Yandex API Gateway v2 HTTP request adapter (detection,
+> validation, normalization) with issue #5, and HTTP response/error mapping
+> plus controller dispatch with issue #6. The Message Queue transport (#7/#8)
+> is next. Observed Yandex Cloud runtime constraints that all connector code
+> must respect are catalogued in [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -64,14 +64,20 @@ Its IAM token (`executionContext.token`) is a secret: automatic serialization
 (`JSON.stringify`) redacts it to `REDACTED_TOKEN` and excludes the raw
 payloads, so accidental logging cannot leak credentials.
 
-The built-in registry currently ships with the HTTP / API Gateway v2 request
-adapter (#5): `version: "2.0"` events are detected, structurally validated,
+The built-in registry currently ships with the HTTP / API Gateway v2 transport
+(#5, #6): `version: "2.0"` events are detected, structurally validated,
 normalized (canonical `rawPath`/`rawQueryString`, both query-parameter views,
 `isBase64Encoded`-driven body decoding) and published to the invocation scope.
-HTTP response/error mapping (#6) and Message Queue support (#7/#8) are not
-landed yet; deliveries no transport claims reject with `ConnectorError` code
-`UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
-`handler.close()` to release the cached application; the next invocation
+Controllers then dispatch through the warm Nest application: guards,
+interceptors, pipes, filters, `@Res()` escape hatches and standard
+`HttpException` mapping behave as on any other platform. Responses serialize
+back to the Yandex Function envelope — JSON objects become
+`application/json`, `Buffer` bodies become Base64 (`isBase64Encoded: true`),
+and repeated header values (e.g. multiple `Set-Cookie`) surface under the
+documented optional `multiValueHeaders` field. Message Queue support (#7/#8)
+is not landed yet; deliveries no transport claims reject with `ConnectorError`
+code `UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can
+call `handler.close()` to release the cached application; the next invocation
 cold-starts again.
 
 ## Architecture
