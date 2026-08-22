@@ -15,12 +15,15 @@ export interface YandexFunctionHttpResponse {
    * lines); single-valued responses keep the exact four-field envelope
    * established before issue #6.
    *
-   * Evidence level: **documented** for proxy-integration responses — per the
-   * Yandex docs a header listed here overrides the same name in `headers`.
-   * Whether payload format 2.0 responses accept this field was not captured
-   * in DATA-ANALYSE.md (the dataset covers request events), so multiplicity
-   * is preserved through it rather than invented: without it, repeated
-   * headers would have to be lossily comma-joined or dropped.
+   * Evidence level: **provisional — pending live verification**. The captured
+   * dataset in DATA-ANALYSE.md covers invocation *requests* only (which show
+   * no `multiValueHeaders` counterpart), so whether payload-format-2.0
+   * *responses* accept this field is not observed. It exists because the
+   * alternative representations are worse: comma-joining repeated values is
+   * lossy (a comma is legal inside Set-Cookie attributes) and dropping them
+   * breaks multi-cookie responses. Per the documented proxy-integration
+   * behavior a header listed here overrides the same name in `headers`.
+   * Consumers relying on this field should verify it against a live function.
    */
   readonly multiValueHeaders?: Readonly<Record<string, readonly string[]>>;
   /** Body payload encoded according to {@link isBase64Encoded}. */

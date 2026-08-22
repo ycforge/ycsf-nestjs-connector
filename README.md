@@ -70,14 +70,21 @@ normalized (canonical `rawPath`/`rawQueryString`, both query-parameter views,
 `isBase64Encoded`-driven body decoding) and published to the invocation scope.
 Controllers then dispatch through the warm Nest application: guards,
 interceptors, pipes, filters, `@Res()` escape hatches and standard
-`HttpException` mapping behave as on any other platform. Responses serialize
-back to the Yandex Function envelope — JSON objects become
-`application/json`, `Buffer` bodies become Base64 (`isBase64Encoded: true`),
-and repeated header values (e.g. multiple `Set-Cookie`) surface under the
-documented optional `multiValueHeaders` field. Message Queue support (#7/#8)
-is not landed yet; deliveries no transport claims reject with `ConnectorError`
-code `UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can
-call `handler.close()` to release the cached application; the next invocation
+`HttpException` mapping behave as on any other platform — the connector's
+adapter only records what Nest registers and replays it per invocation, it
+does not reimplement framework semantics. Responses serialize back to the
+Yandex Function envelope: explicit handler-set content types always win
+(implicit defaults are `application/json`, `text/plain; charset=utf-8`,
+`application/octet-stream`), `Buffer` bodies become Base64
+(`isBase64Encoded: true`) so binary data is never corrupted, and repeated
+header values (e.g. multiple `Set-Cookie`) surface under the optional
+`multiValueHeaders` field. **That field is provisional**: the observed Yandex
+dataset covers requests only, so responses accepting `multiValueHeaders`
+under payload format 2.0 still require live verification (see
+`src/http/response.ts`). Message Queue support (#7/#8) is not landed yet;
+deliveries no transport claims reject with `ConnectorError` code
+`UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
+`handler.close()` to release the cached application; the next invocation
 cold-starts again.
 
 ## Architecture

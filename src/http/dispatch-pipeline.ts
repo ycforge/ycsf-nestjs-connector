@@ -1,170 +1,76 @@
 import type { NormalizedHttpRequest } from "./normalized-request";
 import type { CompiledPathPattern } from "./path-matching";
 import type { YandexHttpRequestFacade, YandexRequestHandler } from "./request-facade";
-import { createRequestFacade, declaresJsonContentType } from "./request-facade";
+import { createRequestFacade } from "./request-facade";
 import type { YandexHttpResponseFacade } from "./response-facade";
 import { createResponseFacade } from "./response-facade";
 import type { YandexFunctionHttpResponse } from "./response";
 import { serializeResponse } from "./serialize-response";
 
-/** Uppercase HTTP verb, or `"*"` for method-independent registrations. */
-export type HttpMethodOrAll = string;
-
-export interface RouteRegistration {
-  readonly method: HttpMethodOrAll;
-  readonly pattern: CompiledPathPattern;
-  readonly handler: YandexRequestHandler;
-}
-
-export interface MiddlewareRegistration {
+/**
+ * One entry of the in-memory dispatch stack.
+ *
+ * The stack mirrors the registration order of a platform server (verified
+ * against @nestjs/core 11 `NestApplication.init()`): body parsers register
+ * before middleware, middleware before routes, and the framework's not-found
+ * handler is terminal. The connector only replays this order per invocation —
+ * every layer itself is an opaque `(req, res, next)` proxy built by NestJS,
+ * which is where guards, interceptors, pipes, filters and status defaults
+ * live.
+ */
+export interface DispatchLayer {
+  readonly kind: "middleware" | "route";
+  /** Uppercase verb for routes (`"*"` for `@All()`), always `"*"` for middleware. */
+  readonly method: string;
   readonly pattern: CompiledPathPattern;
   readonly handler: YandexRequestHandler;
 }
 
 /**
- * Error-layer proxy as installed by NestJS (`setErrorHandler`): receives a
- * failure, runs exception filters and writes the mapped response.
+ * Error-layer proxy as installed by NestJS during init
+ * (`RoutesResolver.registerExceptionHandler` → `setErrorHandler`): receives a
+ * failure, runs exception filters and writes the mapped response. The
+ * connector never inspects or wraps it.
  */
 export type ErrorLayerProxy = (
   error: unknown,
   requestFacade: YandexHttpRequestFacade,
   responseFacade: YandexHttpResponseFacade,
   next: () => void,
-) => void | Promise<void>;
-
-export interface DispatchOptions {
-  readonly request: NormalizedHttpRequest;
-  readonly routes: readonly RouteRegistration[];
-  readonly middlewares: readonly MiddlewareRegistration[];
-  /** Whether JSON bodies parse into `req.body` (platform `bodyParser` option). */
-  readonly jsonBodyParsingEnabled: boolean;
-  /** Exception-layer proxies registered during application init. */
-  readonly notFoundHandler?: YandexRequestHandler;
-  readonly errorHandler?: ErrorLayerProxy;
-}
-
-interface RouteMatch {
-  readonly registration: RouteRegistration;
-  readonly params: Readonly<Record<string, string>>;
-}
-
-type StepFunction = (
-  requestFacade: YandexHttpRequestFacade,
-  responseFacade: YandexHttpResponseFacade,
-  next: (error?: unknown) => void,
 ) => unknown;
 
-function isRouteEligible(routeMethod: HttpMethodOrAll, requestMethod: string): boolean {
-  // Method-independent routes always apply; HEAD falls back to GET handlers
-  // exactly like platform routers do when no explicit HEAD route exists.
-  return (
-    routeMethod === "*" ||
-    routeMethod === requestMethod ||
-    (requestMethod === "HEAD" && routeMethod === "GET")
-  );
+export interface DispatchPlan {
+  readonly request: NormalizedHttpRequest;
+  readonly layers: readonly DispatchLayer[];
+  /** Exception-layer proxy registered by Nest during `app.init()`. */
+  readonly errorLayer?: ErrorLayerProxy;
+  /** Not-found proxy registered by Nest during `app.init()`; terminal. */
+  readonly notFoundHandler?: YandexRequestHandler;
 }
 
-function findMatchingRoute(
-  routes: readonly RouteRegistration[],
-  requestMethod: string,
-  path: string,
-): RouteMatch | undefined {
-  for (const registration of routes) {
-    if (!isRouteEligible(registration.method, requestMethod)) {
-      continue;
-    }
-    const attempt = registration.pattern.match(path);
-    if (attempt.matched) {
-      return { registration, params: attempt.params };
-    }
-  }
-  return undefined;
-}
+const JSON_CONTENT_TYPE_PREFIX = "application/json";
 
-function writeJsonPayload(
-  responseFacade: YandexHttpResponseFacade,
-  statusCode: number,
-  payload: object,
-): void {
-  responseFacade.statusCode = statusCode;
-  responseFacade.setHeader("content-type", "application/json");
-  responseFacade.send(JSON.stringify(payload));
+function declaresJsonContentType(contentType: string | undefined): boolean {
+  return (contentType ?? "").toLowerCase().startsWith(JSON_CONTENT_TYPE_PREFIX);
 }
 
 /**
- * Defense-in-depth fallbacks; during normal operation Nest registers its own
- * layers which produce exactly these shapes (NotFoundException filter and
- * BaseExceptionFilter respectively).
+ * Builds the JSON body parser as an ordinary stack layer — the exact role
+ * `bodyParser.json()` plays on platform servers (ExpressAdapter registers it
+ * through `app.use`). Only `application/json` requests are parsed; other
+ * content types stay opaque bytes at the transport boundary (AGENTS.md
+ * section 31). Malformed JSON funnels a `SyntaxError` through `next(err)`,
+ * which Nest's error layer maps to a deterministic 400 response.
  */
-const DEFAULT_NOT_FOUND_BODY = { statusCode: 404 };
-
-function defaultNotFoundHandler(requestMethod: string, path: string): YandexRequestHandler {
-  return (_requestFacade, responseFacade) => {
-    writeJsonPayload(responseFacade, 404, {
-      ...DEFAULT_NOT_FOUND_BODY,
-      message: `Cannot ${requestMethod} ${path}`,
-    });
-  };
-}
-
-function writeLastResortErrorResponse(responseFacade: YandexHttpResponseFacade): void {
-  // Reached only when even the error layer fails; keeps the wire contract
-  // deterministic instead of letting an unexpected rejection escape to the
-  // gateway (which would surface a platform 502 including stack details).
-  if (responseFacade.headersSent) {
-    return;
-  }
-  writeJsonPayload(responseFacade, 500, { statusCode: 500, message: "Internal server error" });
-}
-
-/**
- * Executes one invocation against the registered middleware and routes
- * (issue #6): builds the per-invocation facades, drives the Express-style
- * chain — each step continues via `next()`, failures funnel into the error
- * layer — and serializes the accumulated state into the wire envelope.
- *
- * Deliberate simplifications over a platform router (documented limitations):
- * the first matching route wins (no fallthrough chains across same-method
- * routes), and `next()` must be called during the handler's synchronous or
- * awaited execution rather than deferred arbitrarily.
- */
-export async function runDispatch(options: DispatchOptions): Promise<YandexFunctionHttpResponse> {
-  const requestFacade = createRequestFacade(options.request);
-  const responseFacade = createResponseFacade();
-
-  const invokeErrorLayer = async (error: unknown): Promise<void> => {
-    if (responseFacade.headersSent) {
-      // The response already left the adapter; mirroring platform behavior,
-      // late failures are not written onto the wire.
-      return;
-    }
-    const errorLayer = options.errorHandler;
-    if (!errorLayer) {
-      writeLastResortErrorResponse(responseFacade);
-      return;
-    }
-    try {
-      await errorLayer(error, requestFacade, responseFacade, () => undefined);
-    } catch {
-      writeLastResortErrorResponse(responseFacade);
-    }
-  };
-
-  // Body parsing runs as the first pipeline step exactly like the platform's
-  // parser middleware: malformed JSON becomes a SyntaxError handed to
-  // `next(err)`, which the error layer maps to a deterministic 400 response.
-  let bodyParsed = false;
-  const parseBodyStep: StepFunction = (_requestFacade, _response, next) => {
+export function createJsonBodyParser(): YandexRequestHandler {
+  return (requestFacade, _responseFacade, next) => {
     if (
-      !options.jsonBodyParsingEnabled ||
-      bodyParsed ||
       requestFacade.rawBody === undefined ||
       !declaresJsonContentType(requestFacade.headers["content-type"])
     ) {
       next();
       return;
     }
-    bodyParsed = true;
     try {
       requestFacade.body = JSON.parse(requestFacade.rawBody.toString("utf8"));
     } catch (error) {
@@ -173,62 +79,161 @@ export async function runDispatch(options: DispatchOptions): Promise<YandexFunct
     }
     next();
   };
+}
 
-  const middlewareSteps: StepFunction[] = [];
-  for (const registration of options.middlewares) {
-    if (registration.pattern.matchesPrefix(options.request.path)) {
-      middlewareSteps.push(registration.handler);
-    }
+/**
+ * Last-resort wire responses, reached only when no registered layer produced
+ * one. After a successful cold start Nest always registers its not-found and
+ * error proxies (verified against @nestjs/core 11 `registerRouterHooks`),
+ * whose filters emit these exact shapes — the fallbacks exist so that even a
+ * broken filter chain yields a deterministic envelope instead of an arbitrary
+ * payload to the gateway (AGENTS.md sections 8/11).
+ */
+function writeLastResortResponse(
+  responseFacade: YandexHttpResponseFacade,
+  statusCode: number,
+  message: string,
+): void {
+  if (responseFacade.headersSent) {
+    // The response already left the adapter; mirroring platform behavior,
+    // late failures are not written onto the wire.
+    return;
   }
+  responseFacade.status(statusCode);
+  responseFacade.json({ statusCode, message });
+}
 
-  const requestMethod = options.request.method.toUpperCase();
-  const routeStep: StepFunction = (_requestFacade, response, next) => {
-    const match = findMatchingRoute(options.routes, requestMethod, options.request.path);
-    if (!match) {
-      const notFound =
-        options.notFoundHandler ?? defaultNotFoundHandler(requestMethod, options.request.path);
-      return notFound(requestFacade, response, next);
-    }
-    // Route parameters are bound per request, mirroring how a platform
-    // router populates `req.params` right before invoking the handler.
-    Object.assign(requestFacade.params, match.params);
-    return match.registration.handler(requestFacade, response, next);
+function cannotFindMessage(method: string, path: string): string {
+  return `Cannot ${method} ${path}`;
+}
+
+function matchesRouteMethod(layerMethod: string, requestMethod: string): boolean {
+  // HEAD falls back to GET handlers when no explicit HEAD route matched
+  // earlier in the scan — the one piece of router semantics express performs
+  // internally that Nest does not provide to custom adapters.
+  return (
+    layerMethod === "*" ||
+    layerMethod === requestMethod ||
+    (requestMethod === "HEAD" && layerMethod === "GET")
+  );
+}
+
+/**
+ * Drives one invocation through the registered stack (issue #6).
+ *
+ * This is deliberately a miniature of what an HTTP framework's router does —
+ * ordered scanning, prefix matching for mounts, full matching with parameter
+ * capture for routes, fallthrough via `next()`, and a single error hop —
+ * because on a real platform those jobs belong to Express/Fastify, which the
+ * connector replaces. Everything above that level happens inside the opaque
+ * Nest proxies stored on the layers, not here.
+ */
+export async function runDispatch(plan: DispatchPlan): Promise<YandexFunctionHttpResponse> {
+  const requestFacade = createRequestFacade(plan.request);
+  const responseFacade = createResponseFacade();
+  const requestPath = plan.request.path;
+  const requestMethod = plan.request.method.toUpperCase();
+
+  const respondWithCannotFind = (): void => {
+    writeLastResortResponse(responseFacade, 404, cannotFindMessage(requestMethod, requestPath));
   };
 
-  const steps: StepFunction[] = [parseBodyStep, ...middlewareSteps, routeStep];
+  const invokeErrorLayer = async (error: unknown): Promise<void> => {
+    if (plan.errorLayer === undefined) {
+      writeLastResortResponse(responseFacade, 500, "Internal server error");
+      return;
+    }
+    try {
+      await plan.errorLayer(error, requestFacade, responseFacade, () => undefined);
+      if (!responseFacade.headersSent) {
+        writeLastResortResponse(responseFacade, 500, "Internal server error");
+      }
+    } catch {
+      writeLastResortResponse(responseFacade, 500, "Internal server error");
+    }
+  };
+
+  const invokeNotFound = async (): Promise<void> => {
+    if (plan.notFoundHandler === undefined) {
+      respondWithCannotFind();
+      return;
+    }
+    try {
+      await plan.notFoundHandler(requestFacade, responseFacade, () => undefined);
+      if (!responseFacade.headersSent) {
+        respondWithCannotFind();
+      }
+    } catch {
+      respondWithCannotFind();
+    }
+  };
 
   let index = -1;
-  const drive = async (): Promise<void> => {
-    while (true) {
-      index += 1;
-      const step = steps[index];
-      if (step === undefined || responseFacade.headersSent) {
+
+  const advance = async (): Promise<void> => {
+    index += 1;
+    const layer = plan.layers[index];
+
+    if (layer === undefined) {
+      if (!responseFacade.headersSent) {
+        await invokeNotFound();
+      }
+      return;
+    }
+
+    if (!matchesRouteMethod(layer.method, requestMethod)) {
+      await advance();
+      return;
+    }
+
+    if (layer.kind === "route") {
+      const match = layer.pattern.match(requestPath);
+      if (!match.matched) {
+        await advance();
         return;
       }
-      let continued = false;
-      try {
-        await step(requestFacade, responseFacade, (error?: unknown) => {
-          if (continued) {
-            throw new Error("next() called multiple times");
-          }
-          continued = true;
-          if (error !== undefined && error !== null) {
-            // Re-thrown so the failure funnels through the same path as
-            // handler exceptions instead of continuing the chain.
-            throw error;
-          }
-        });
-        if (!continued) {
-          return;
-        }
-      } catch (error) {
-        await invokeErrorLayer(error);
+      // Route parameters belong to the matched route only; clearing first
+      // keeps stale captures from leaking when falling through later layers
+      // (express resets req.params per matched layer).
+      for (const key of Object.keys(requestFacade.params)) {
+        delete requestFacade.params[key];
+      }
+      Object.assign(requestFacade.params, match.params);
+    } else if (!layer.pattern.matchesPrefix(requestPath)) {
+      await advance();
+      return;
+    }
+
+    let handedOff = false;
+    // The layer may call next() synchronously or asynchronously; either way
+    // the driver must not serialize until the whole forwarded chain settled.
+    let continuation: Promise<void> | undefined;
+    const next: (error?: unknown) => void = (error?: unknown) => {
+      if (handedOff) {
+        throw new Error("next() called multiple times");
+      }
+      handedOff = true;
+      if (error !== undefined && error !== null) {
+        continuation = invokeErrorLayer(error);
         return;
       }
+      continuation = advance();
+    };
+
+    try {
+      const outcome = layer.handler(requestFacade, responseFacade, next);
+      if (outcome instanceof Promise) {
+        await outcome;
+      }
+      if (continuation !== undefined) {
+        await continuation;
+      }
+    } catch (error) {
+      await invokeErrorLayer(error);
     }
   };
 
-  await drive();
+  await advance();
 
   return serializeResponse(responseFacade);
 }

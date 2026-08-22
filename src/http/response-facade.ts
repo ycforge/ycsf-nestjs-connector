@@ -7,8 +7,8 @@
  * Header storage keeps insertion order and multiplicity per lowercased name:
  * single values serialize into the flat `headers` map of the wire envelope,
  * repeated appends (typically multiple `Set-Cookie` lines) go through the
- * documented `multiValueHeaders` response field instead of being lossily
- * joined (see `response.ts` for the evidence level).
+ * provisional `multiValueHeaders` response field instead of being lossily
+ * joined (see `response.ts` for the evidence level and verification status).
  */
 
 export interface HeaderEntry {
@@ -24,7 +24,7 @@ interface ResponseSerializationAccess {
   /** All stored headers in insertion order, including repeated values. */
   readonly headerEntries: readonly HeaderEntry[];
   /** Final payload handed to reply/send/json/end, or undefined when empty. */
-  readonly bodyPayload: unknown;
+  readonly bodyPayload: string | Buffer | undefined;
 }
 
 /**
@@ -58,6 +58,16 @@ export type YandexHttpResponseFacade = ResponseSerializationAccess & {
   redirect(statusCode: number, url: string): void;
 };
 
+/**
+ * Transport policy for implicit content types, applied exactly once — here,
+ * at payload-write time — and nowhere else (AGENTS.md section 12: no magic
+ * constants scattered across layers). Handlers that set an explicit
+ * `Content-Type` always win.
+ */
+const IMPLICIT_JSON_CONTENT_TYPE = "application/json";
+const IMPLICIT_TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+const IMPLICIT_BINARY_CONTENT_TYPE = "application/octet-stream";
+
 function normalizeHeaderName(name: string): string {
   return name.toLowerCase();
 }
@@ -65,7 +75,7 @@ function normalizeHeaderName(name: string): string {
 export function createResponseFacade(): YandexHttpResponseFacade {
   let statusCode = 200;
   let ended = false;
-  let bodyPayload: unknown = undefined;
+  let bodyPayload: string | Buffer | undefined = undefined;
   const headerValues = new Map<string, string[]>();
 
   const facade: YandexHttpResponseFacade = {
@@ -117,23 +127,34 @@ export function createResponseFacade(): YandexHttpResponseFacade {
 
     json(payload) {
       if (!facade.hasHeader("content-type")) {
-        facade.setHeader("content-type", "application/json");
+        facade.setHeader("content-type", IMPLICIT_JSON_CONTENT_TYPE);
       }
-      bodyPayload = payload;
+      // Serialized at write time, not in the serializer: a serialization
+      // failure (e.g. circular structures) then surfaces inside the route
+      // proxy's try/catch and maps through Nest's exception filters to a
+      // proper 500 response — exactly like platform servers.
+      bodyPayload = JSON.stringify(payload);
       ended = true;
     },
 
     send(payload) {
-      if (!facade.hasHeader("content-type")) {
-        if (Buffer.isBuffer(payload)) {
-          facade.setHeader("content-type", "application/octet-stream");
-        } else if (typeof payload === "string") {
-          facade.setHeader("content-type", "text/plain; charset=utf-8");
-        } else {
-          facade.setHeader("content-type", "application/json");
+      if (typeof payload === "string") {
+        if (!facade.hasHeader("content-type")) {
+          facade.setHeader("content-type", IMPLICIT_TEXT_CONTENT_TYPE);
         }
+        bodyPayload = payload;
+      } else if (Buffer.isBuffer(payload)) {
+        if (!facade.hasHeader("content-type")) {
+          facade.setHeader("content-type", IMPLICIT_BINARY_CONTENT_TYPE);
+        }
+        bodyPayload = payload;
+      } else {
+        // Objects behave like json() (express parity for res.send(obj)).
+        if (!facade.hasHeader("content-type")) {
+          facade.setHeader("content-type", IMPLICIT_JSON_CONTENT_TYPE);
+        }
+        bodyPayload = JSON.stringify(payload);
       }
-      bodyPayload = payload;
       ended = true;
     },
 
@@ -146,6 +167,7 @@ export function createResponseFacade(): YandexHttpResponseFacade {
       facade.setHeader("location", url);
       // Deliberate deviation from Express: no HTML redirect body — an API
       // gateway envelope carries the Location header, not a landing page.
+      // Set directly: an empty body must not gain an implicit content type.
       bodyPayload = "";
       ended = true;
     },

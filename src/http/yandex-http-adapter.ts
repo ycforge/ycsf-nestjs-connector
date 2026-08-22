@@ -6,29 +6,40 @@ import type { YandexHttpRequestFacade, YandexRequestHandler } from "./request-fa
 import type { YandexHttpResponseFacade } from "./response-facade";
 import type { YandexFunctionHttpResponse } from "./response";
 import {
+  createJsonBodyParser,
   runDispatch,
+  type DispatchLayer,
   type ErrorLayerProxy,
-  type MiddlewareRegistration,
-  type RouteRegistration,
 } from "./dispatch-pipeline";
 
 /**
- * Adapter configuration; `jsonBodyParsingEnabled` flips to `true` when Nest
- * calls {@linkcode YandexHttpAdapter.registerParserMiddleware} during
- * `app.init()` (mirroring the platform `bodyParser` option, default enabled).
+ * Route arguments accepted by every verb registrar: either `(path, handler)`
+ * or bare `(handler)` (root path), mirroring the base SPI overloads.
  */
-interface AdapterOptions {
-  jsonBodyParsingEnabled: boolean;
-}
+type RouteArgs = [handler: YandexRequestHandler] | [path: string, handler: YandexRequestHandler];
 
-const INITIAL_ADAPTER_OPTIONS: AdapterOptions = { jsonBodyParsingEnabled: false };
+function splitRouteArgs(args: RouteArgs): [path: string, handler: YandexRequestHandler] {
+  if (args.length === 2) {
+    return [args[0], args[1]];
+  }
+  return ["/", args[0]];
+}
 
 /**
  * In-memory HTTP adapter over which the connector bootstraps NestJS
- * (issue #6). It implements the platform SPI without a Node HTTP server:
- * routes and middleware are recorded during cold start (`app.init()`), and
- * every invocation replays them in memory against the normalized gateway
- * request via {@link runDispatch}.
+ * (`NestFactory.create(AppModule, adapter)`), replacing the platform HTTP
+ * server without pulling in Express or opening sockets.
+ *
+ * The adapter is intentionally thin: during cold start it only *records* the
+ * layers Nest registers through the transport SPI (body parser via
+ * {@linkcode registerParserMiddleware}, middleware via
+ * {@linkcode createMiddlewareFactory}/`use`, routes via the verb methods, and
+ * the terminal not-found/error proxies via `setNotFoundHandler`/
+ * `setErrorHandler`). Every recorded layer is an opaque `(req, res, next)`
+ * proxy built by NestJS, so routing decisions, guards, interceptors, pipes,
+ * filters, status defaults and exception mapping remain framework semantics.
+ * Per invocation {@linkcode dispatch} replays the recorded order through
+ * {@link runDispatch} — the small router role express would otherwise play.
  *
  * Per AGENTS.md section 11 nothing invocation-specific lives on the adapter —
  * request/response state is created per dispatch — so one instance per
@@ -39,30 +50,18 @@ export class YandexHttpAdapter extends AbstractHttpAdapter<
   YandexHttpRequestFacade,
   YandexHttpResponseFacade
 > {
-  private readonly adapterOptions: AdapterOptions;
+  private readonly stack: DispatchLayer[] = [];
 
-  private readonly routes: RouteRegistration[] = [];
-  private readonly middlewares: MiddlewareRegistration[] = [];
+  private errorHandler: ErrorLayerProxy | undefined;
+  private notFoundHandler: YandexRequestHandler | undefined;
 
-  private notFoundLayer: YandexRequestHandler | undefined;
-  private errorLayer: ErrorLayerProxy | undefined;
-
-  constructor(adapterOptions: AdapterOptions = INITIAL_ADAPTER_OPTIONS) {
-    super(undefined);
-    // Copied on purpose: registration mutates parsing state while the caller
-    // may retain its options object.
-    this.adapterOptions = { ...adapterOptions };
-  }
-
-  /** Runs one normalized gateway request through the registered pipeline. */
+  /** Runs one normalized gateway request through the recorded layer stack. */
   dispatch(normalizedRequest: NormalizedHttpRequest): Promise<YandexFunctionHttpResponse> {
     return runDispatch({
       request: normalizedRequest,
-      routes: this.routes,
-      middlewares: this.middlewares,
-      jsonBodyParsingEnabled: this.adapterOptions.jsonBodyParsingEnabled,
-      notFoundHandler: this.notFoundLayer,
-      errorHandler: this.errorLayer,
+      layers: this.stack,
+      errorLayer: this.errorHandler,
+      notFoundHandler: this.notFoundHandler,
     });
   }
 
@@ -119,7 +118,8 @@ export class YandexHttpAdapter extends AbstractHttpAdapter<
   }
 
   // ---------------------------------------------------------------------------
-  // Request/response SPI consumed by the Nest router pipeline.
+  // Request/response accessors consumed by the framework's response
+  // controller and exception filters. Pure delegation to the facade.
   // ---------------------------------------------------------------------------
 
   override getRequestHostname(requestFacade: YandexHttpRequestFacade): string {
@@ -197,19 +197,33 @@ export class YandexHttpAdapter extends AbstractHttpAdapter<
     responseFacade.appendHeader(name, value);
   }
 
+  // ---------------------------------------------------------------------------
+  // Layer registration: recording only, no routing decisions here.
+  // ---------------------------------------------------------------------------
+
   override registerParserMiddleware(): void {
-    // Called once during app.init() unless the application opts out with
-    // `bodyParser: false`; enables JSON body parsing for all later
-    // invocations of this warm application.
-    this.adapterOptions.jsonBodyParsingEnabled = true;
+    // Called once during app.init() (with global-prefix and rawBody arguments
+    // the connector does not accept; see below). Joins the stack at its
+    // registration position, exactly like platform parsers registered through
+    // `app.use`. Mount prefixes do not exist in the serverless envelope and
+    // raw-body re-exposure is not supported, so both are deliberately
+    // unimplemented rather than silently misapplied.
+    this.stack.push({
+      kind: "middleware",
+      method: "*",
+      pattern: compilePathPattern("/"),
+      handler: createJsonBodyParser(),
+    });
   }
 
   override setErrorHandler(handler: ErrorLayerProxy): void {
-    this.errorLayer = handler;
+    // The optional mount-prefix argument is not implemented: responses are
+    // always global on this adapter.
+    this.errorHandler = handler;
   }
 
   override setNotFoundHandler(handler: YandexRequestHandler): void {
-    this.notFoundLayer = handler;
+    this.notFoundHandler = handler;
   }
 
   override createMiddlewareFactory(): (
@@ -217,205 +231,126 @@ export class YandexHttpAdapter extends AbstractHttpAdapter<
     // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- mirrors the platform SPI declaration; see below
     callback: Function,
   ) => void {
-    // Method gating for method-scoped middleware happens inside the Nest
-    // middleware module wrapper; the connector stores every entry in one
-    // ordered chain.
+    // Method gating for method-scoped middleware happens inside Nest's own
+    // wrapper (verified against @nestjs/core 11 MiddlewareModule), so every
+    // entry lands in the same ordered chain regardless of its verb.
     //
     // The `Function` parameter mirrors the platform SPI declaration verbatim;
     // narrowing it is impossible because the base type compares the returned
     // registrar strictly against `callback: Function`. Every value crossing
-    // here comes from Nest's router proxies, which share the connector's
-    // (req, res, next) contract (verified against @nestjs/core 11 sources),
-    // so the conversion below is safe by construction.
+    // here comes from Nest's middleware proxies, which share the connector's
+    // (req, res, next) contract, so the conversion below is safe by
+    // construction.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
     return (path, callback: Function): void => {
-      this.middlewares.push({
-        pattern: compilePathPattern(path),
-        handler: callback as unknown as YandexRequestHandler,
-      });
+      this.addMiddleware(path, callback as unknown as YandexRequestHandler);
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Route registration: recorded for in-memory replay during dispatch.
-  //
-  // Every verb exposes both platform call shapes ((path, handler) and bare
-  // (handler)) so handler parameters are contextually typed instead of
-  // collapsing into `any`.
-  // ---------------------------------------------------------------------------
-
-  override use(path: string, handler: YandexRequestHandler): void;
-  override use(handler: YandexRequestHandler): void;
-  override use(pathOrHandler: string | YandexRequestHandler, handler?: YandexRequestHandler): void {
-    const path = typeof pathOrHandler === "string" ? pathOrHandler : "/";
-    const middleware = typeof pathOrHandler === "string" ? handler : pathOrHandler;
-    if (typeof middleware !== "function") {
-      throw new Error("use() requires a middleware handler");
+  override use(...args: unknown[]): void {
+    const [first, second] = args;
+    if (typeof first === "string") {
+      this.addMiddleware(first, second as YandexRequestHandler);
+      return;
     }
-    this.middlewares.push({
+    this.addMiddleware("/", first as YandexRequestHandler);
+  }
+
+  private addMiddleware(path: string, handler: YandexRequestHandler): void {
+    if (typeof handler !== "function") {
+      throw new Error("middleware registration requires a handler");
+    }
+    this.stack.push({
+      kind: "middleware",
+      method: "*",
       pattern: compilePathPattern(path),
-      handler: middleware,
+      handler,
     });
   }
 
-  private registerRoute(
-    method: RequestMethod,
-    pathOrHandler: string | YandexRequestHandler,
-    maybeHandler?: YandexRequestHandler,
-  ): void {
-    const path = typeof pathOrHandler === "string" ? pathOrHandler : "/";
-    const handler = typeof pathOrHandler === "string" ? maybeHandler : pathOrHandler;
+  private addRoute(method: RequestMethod, args: RouteArgs): void {
+    const [path, handler] = splitRouteArgs(args);
     if (typeof handler !== "function") {
       throw new Error(`route registration for "${method}" requires a handler`);
     }
-    this.routes.push({
+    this.stack.push({
+      kind: "route",
       method: method === RequestMethod.ALL ? "*" : RequestMethod[method],
       pattern: compilePathPattern(path),
       handler,
     });
   }
 
-  override get(path: string, handler: YandexRequestHandler): void;
-  override get(handler: YandexRequestHandler): void;
-  override get(pathOrHandler: string | YandexRequestHandler, handler?: YandexRequestHandler): void {
-    this.registerRoute(RequestMethod.GET, pathOrHandler, handler);
+  // Every verb below is part of the transport SPI: Nest resolves them by name
+  // at cold start (RouterMethodFactory) to install its per-route proxies, so
+  // each override records the proxy verbatim and defers entirely to the
+  // framework.
+
+  override get(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.GET, args);
   }
 
-  override post(path: string, handler: YandexRequestHandler): void;
-  override post(handler: YandexRequestHandler): void;
-  override post(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.POST, pathOrHandler, handler);
+  override post(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.POST, args);
   }
 
-  override put(path: string, handler: YandexRequestHandler): void;
-  override put(handler: YandexRequestHandler): void;
-  override put(pathOrHandler: string | YandexRequestHandler, handler?: YandexRequestHandler): void {
-    this.registerRoute(RequestMethod.PUT, pathOrHandler, handler);
+  override put(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.PUT, args);
   }
 
-  override delete(path: string, handler: YandexRequestHandler): void;
-  override delete(handler: YandexRequestHandler): void;
-  override delete(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.DELETE, pathOrHandler, handler);
+  override delete(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.DELETE, args);
   }
 
-  override patch(path: string, handler: YandexRequestHandler): void;
-  override patch(handler: YandexRequestHandler): void;
-  override patch(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.PATCH, pathOrHandler, handler);
+  override patch(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.PATCH, args);
   }
 
-  override options(path: string, handler: YandexRequestHandler): void;
-  override options(handler: YandexRequestHandler): void;
-  override options(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.OPTIONS, pathOrHandler, handler);
+  override options(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.OPTIONS, args);
   }
 
-  override head(path: string, handler: YandexRequestHandler): void;
-  override head(handler: YandexRequestHandler): void;
-  override head(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.HEAD, pathOrHandler, handler);
+  override head(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.HEAD, args);
   }
 
-  override search(path: string, handler: YandexRequestHandler): void;
-  override search(handler: YandexRequestHandler): void;
-  override search(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.SEARCH, pathOrHandler, handler);
+  override search(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.SEARCH, args);
   }
 
-  override query(path: string, handler: YandexRequestHandler): void;
-  override query(handler: YandexRequestHandler): void;
-  override query(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.QUERY, pathOrHandler, handler);
+  override query(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.QUERY, args);
   }
 
-  override propfind(path: string, handler: YandexRequestHandler): void;
-  override propfind(handler: YandexRequestHandler): void;
-  override propfind(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.PROPFIND, pathOrHandler, handler);
+  override propfind(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.PROPFIND, args);
   }
 
-  override proppatch(path: string, handler: YandexRequestHandler): void;
-  override proppatch(handler: YandexRequestHandler): void;
-  override proppatch(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.PROPPATCH, pathOrHandler, handler);
+  override proppatch(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.PROPPATCH, args);
   }
 
-  override mkcol(path: string, handler: YandexRequestHandler): void;
-  override mkcol(handler: YandexRequestHandler): void;
-  override mkcol(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.MKCOL, pathOrHandler, handler);
+  override mkcol(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.MKCOL, args);
   }
 
-  override copy(path: string, handler: YandexRequestHandler): void;
-  override copy(handler: YandexRequestHandler): void;
-  override copy(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.COPY, pathOrHandler, handler);
+  override copy(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.COPY, args);
   }
 
-  override move(path: string, handler: YandexRequestHandler): void;
-  override move(handler: YandexRequestHandler): void;
-  override move(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.MOVE, pathOrHandler, handler);
+  override move(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.MOVE, args);
   }
 
-  override lock(path: string, handler: YandexRequestHandler): void;
-  override lock(handler: YandexRequestHandler): void;
-  override lock(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.LOCK, pathOrHandler, handler);
+  override lock(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.LOCK, args);
   }
 
-  override unlock(path: string, handler: YandexRequestHandler): void;
-  override unlock(handler: YandexRequestHandler): void;
-  override unlock(
-    pathOrHandler: string | YandexRequestHandler,
-    handler?: YandexRequestHandler,
-  ): void {
-    this.registerRoute(RequestMethod.UNLOCK, pathOrHandler, handler);
+  override unlock(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.UNLOCK, args);
   }
 
-  override all(path: string, handler: YandexRequestHandler): void;
-  override all(handler: YandexRequestHandler): void;
-  override all(pathOrHandler: string | YandexRequestHandler, handler?: YandexRequestHandler): void {
-    this.registerRoute(RequestMethod.ALL, pathOrHandler, handler);
+  override all(...args: RouteArgs): void {
+    this.addRoute(RequestMethod.ALL, args);
   }
 }

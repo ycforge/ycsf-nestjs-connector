@@ -5,10 +5,12 @@ import type { YandexHttpResponseFacade } from "./response-facade";
  * Serializes the per-invocation response state into the wire envelope the
  * function runtime expects (issue #6).
  *
- * Encoding policy mirrors the observed gateway contract in reverse: text goes
- * out plain, binary goes out Base64 with `isBase64Encoded` set — binary data
- * must never be corrupted by string coercion (AGENTS.md section 4.4). Content
- * types are defaulted only when the handler did not set one explicitly.
+ * This module owns exactly one transport policy: **body encoding**. Text goes
+ * out plain; binary goes out Base64 with `isBase64Encoded` set, because
+ * binary data must never be corrupted by string coercion through the gateway
+ * (AGENTS.md section 4.4). Content types are deliberately NOT defaulted here
+ * — that policy lives at payload-write time in `response-facade.ts`, so an
+ * explicit handler decision always wins and the rule exists in one place.
  */
 export function serializeResponse(facade: YandexHttpResponseFacade): YandexFunctionHttpResponse {
   const payload = facade.bodyPayload;
@@ -21,12 +23,8 @@ export function serializeResponse(facade: YandexHttpResponseFacade): YandexFunct
   } else if (Buffer.isBuffer(payload)) {
     body = payload.toString("base64");
     isBase64Encoded = true;
-  } else if (typeof payload === "string") {
-    body = payload;
   } else {
-    // Objects, arrays and primitives serializing through the JSON encoder;
-    // this is also the shape controllers return by convention.
-    body = JSON.stringify(payload);
+    body = payload;
   }
 
   const headers: Record<string, string> = {};
@@ -38,22 +36,9 @@ export function serializeResponse(facade: YandexHttpResponseFacade): YandexFunct
     }
     // Repeated values cannot live in the flat map without being joined
     // lossily (a comma is legal inside Set-Cookie attributes), so they move
-    // to the documented multi-value field; per the platform docs a header
-    // present there overrides the flat map, so the name stays out of it.
+    // to the multi-value field; per the platform docs a header present there
+    // overrides the flat map, so the name stays out of it.
     multiValueHeaders[entry.name] = [...entry.values];
-  }
-
-  if (
-    body !== "" &&
-    !Object.prototype.hasOwnProperty.call(headers, "content-type") &&
-    !Object.prototype.hasOwnProperty.call(multiValueHeaders, "content-type")
-  ) {
-    if (isBase64Encoded) {
-      headers["content-type"] = "application/octet-stream";
-    } else {
-      headers["content-type"] =
-        typeof payload === "string" ? "text/plain; charset=utf-8" : "application/json";
-    }
   }
 
   return isMultiValueHeadersEmpty(multiValueHeaders)

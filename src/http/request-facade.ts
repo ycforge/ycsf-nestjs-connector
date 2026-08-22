@@ -82,7 +82,9 @@ const JSON_CONTENT_TYPE_PREFIX = "application/json";
 
 /**
  * Whether this request declares a JSON content type; only such bodies are
- * auto-parsed (form bodies stay unparsed by design, AGENTS.md section 31).
+ * auto-parsed by the transport body parser (form bodies stay unparsed by
+ * design, AGENTS.md section 31). Exported for the dispatch pipeline, which
+ * owns the parser layer.
  */
 export function declaresJsonContentType(contentType: string | undefined): boolean {
   return (contentType ?? "").toLowerCase().startsWith(JSON_CONTENT_TYPE_PREFIX);

@@ -1,6 +1,8 @@
 import { normalizeHttpRequest } from "./normalize-request";
 import type { RawHttpApiGatewayV2Event } from "./raw-event";
 import type { YandexFunctionHttpResponse } from "./response";
+import type { YandexHttpRequestFacade } from "./request-facade";
+import type { YandexHttpResponseFacade } from "./response-facade";
 import { YandexHttpAdapter } from "./yandex-http-adapter";
 
 /**
@@ -412,19 +414,52 @@ describe("yandex http adapter routing behavior", () => {
     expect(result.statusCode).toBe(404);
   });
 
+  it("falls through to later matching routes when a handler calls next() without responding", async () => {
+    const adapter = new YandexHttpAdapter();
+    const callOrder: string[] = [];
+
+    // Express router semantics: a matched handler that forwards via next()
+    // continues the scan into subsequent layers instead of ending the
+    // exchange; only stack exhaustion reaches the terminal not-found proxy.
+    adapter.get("/probe", (_requestFacade, responseFacade, next) => {
+      callOrder.push("first");
+      responseFacade.setHeader("X-Passed-First", "yes");
+      next();
+    });
+    adapter.get("/probe", (_requestFacade, responseFacade) => {
+      callOrder.push("second");
+      responseFacade.setHeader("X-Passed-Second", "yes");
+      responseFacade.json({ reached: "second" });
+    });
+
+    const result = await dispatch(adapter, makeEvent());
+
+    expect(callOrder).toEqual(["first", "second"]);
+    expect(JSON.parse(result.body)).toEqual({ reached: "second" });
+    expect(result.headers["x-passed-first"]).toBe("yes");
+    expect(result.headers["x-passed-second"]).toBe("yes");
+  });
+
   it("runs middleware before routes and lets responses short-circuit the chain", async () => {
     const adapter = new YandexHttpAdapter();
     const callOrder: string[] = [];
 
-    adapter.use("/", (requestFacade, responseFacade, next) => {
-      callOrder.push("gatekeeper");
-      if (requestFacade.headers["x-token"] !== "expected") {
-        responseFacade.statusCode = 401;
-        responseFacade.json({ statusCode: 401, message: "Unauthorized" });
-        return;
-      }
-      next();
-    });
+    adapter.use(
+      "/",
+      (
+        requestFacade: YandexHttpRequestFacade,
+        responseFacade: YandexHttpResponseFacade,
+        next: (error?: unknown) => void,
+      ) => {
+        callOrder.push("gatekeeper");
+        if (requestFacade.headers["x-token"] !== "expected") {
+          responseFacade.statusCode = 401;
+          responseFacade.json({ statusCode: 401, message: "Unauthorized" });
+          return;
+        }
+        next();
+      },
+    );
     adapter.get("/protected", () => {
       callOrder.push("handler");
     });

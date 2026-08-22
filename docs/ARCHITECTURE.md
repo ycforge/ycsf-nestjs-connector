@@ -113,13 +113,14 @@ export const handler; // consumed by the Yandex Cloud Function runtime
 - On first invocation the core bootstraps the Nest application exactly once.
 - The bootstrap uses `NestFactory.create(AppModule, new YandexHttpAdapter())`
   over the framework transport SPI (`AbstractHttpAdapter`), followed by
-  `app.init()`: Nest builds the full dependency graph and registers routes,
+  `app.init()`: Nest builds the full dependency graph and records routes,
   middleware and body parsing with the connector's own adapter instead of an
   HTTP listener. No socket is opened and no platform package
   (`@nestjs/platform-express`) is required; the only peers stay
-  `@nestjs/common`/`@nestjs/core`. Controller dispatch then flows through the
-  warm application itself, so framework semantics (guards, interceptors,
-  pipes, filters) apply unchanged.
+  `@nestjs/common`/`@nestjs/core`. The adapter only records what Nest
+  registers — routing decisions, guards, interceptors, pipes, filters,
+  status defaults and exception mapping stay inside the framework's opaque
+  route proxies, which the dispatch layer replays per invocation.
 - Initialization is race-safe: a single shared initialization promise lives in
   the handler factory closure, so concurrent cold invocations await one
   instance instead of building duplicate applications (AGENTS.md §10.3). One
@@ -215,9 +216,19 @@ publishes the normalized `NormalizedHttpRequest` into the invocation scope
 before user code runs. Controller dispatch then goes through the warm
 application itself: the transport resolves the application's HTTP adapter,
 verifies it is the connector's own (`YandexHttpAdapter`), and hands it the
-normalized request plus a fresh response facade. The dispatch pipeline runs
-body parsing, registered middleware, route resolution and error handling in
-framework order; response serialization maps the facade onto the
+normalized request plus a fresh response facade.
+
+The SPI adapter is deliberately thin: during cold start it only _records_ the
+layers Nest registers through the framework transport SPI — the JSON body
+parser, functional middleware, per-route handler proxies, and the terminal
+not-found/error proxies — in registration order. Per invocation, the small
+dispatch pipeline replays that order (the router role Express would otherwise
+play): ordered scanning, prefix matching for mounts, full matching with
+parameter capture for routes, fallthrough via `next()`, and one error hop.
+Every recorded layer is an opaque `(req, res, next)` proxy built by NestJS, so
+guards, interceptors, pipes, filters, status defaults and exception mapping
+remain framework semantics — the connector neither reimplements nor inspects
+them. Response serialization maps the facade onto the
 `YandexFunctionHttpResponse` envelope (section 6.1).
 
 ## 5. Raw data preservation
@@ -252,29 +263,42 @@ async semantics.
 ### 6.1 Synchronous HTTP
 
 - Exceptions raised inside controllers/services are first-class NestJS
-  territory: the dispatch pipeline runs the application's registered exception
-  layers (`setErrorHandler`) after middleware and route execution, so normal
-  exception filters and `HttpException` mapping produce the HTTP response
-  unchanged. The connector does not swallow or wrap them.
+  territory: every route is an opaque framework proxy, so normal exception
+  filters and `HttpException` mapping produce the HTTP response unchanged.
+  The connector does not swallow or wrap them.
 - Failures escaping every registered layer fall back to a deterministic,
   opaque internal-server-error envelope (`statusCode` `500`,
   `"Internal server error"`) mirroring the platform default; neither the error
   message nor stack frames reach the client (AGENTS.md §8.1).
 - Success serialization maps the response facade onto
-  `YandexFunctionHttpResponse`: string bodies stay plain UTF-8, `Buffer`
-  bodies become Base64 with `isBase64Encoded: true`, and JSON objects
-  serialize as `application/json`. Single-value headers collapse to strings;
-  repeated values (e.g. multiple `Set-Cookie` appends) surface under the
-  documented optional `multiValueHeaders` field instead of being lost or
-  comma-joined (**documented**, not an observed runtime field).
+  `YandexFunctionHttpResponse`. Transport policy is explicit and lives in
+  exactly two places: implicit content types are decided once, at
+  payload-write time in the response facade (`application/json` for JSON,
+  `text/plain; charset=utf-8` for strings, `application/octet-stream` for
+  buffers — an explicit handler-set `Content-Type` always wins), and body
+  encoding is decided once, in the serializer (strings stay plain UTF-8;
+  `Buffer` bodies become Base64 with `isBase64Encoded: true` so binary data is
+  never corrupted by string coercion). Single-value headers collapse to
+  strings; repeated values (e.g. multiple `Set-Cookie` appends) surface under
+  the `multiValueHeaders` field instead of being comma-joined.
+- `multiValueHeaders` is **provisional — pending live verification**: the
+  captured dataset covers request events only, so whether payload-format-2.0
+  responses accept this field is not observed. It preserves multiplicity that
+  would otherwise be lost lossily; consumers relying on it should verify it
+  against a live function.
 - Framework router semantics are inherited rather than reimplemented:
-  unmatched routes produce the platform's 404 envelope (`Cannot …` message)
-  through the connector's defense-in-depth fallbacks (which only fire when no
-  Nest layer is registered), and `POST` routes default to `201 Created`.
+  unmatched requests reach Nest's own not-found proxy (`Cannot …` envelope),
+  `POST` routes default to `201 Created`, `HEAD` falls back to `GET`, and a
+  handler forwarding via `next()` falls through to later matching layers —
+  express router behavior the connector reproduces because it replaces the
+  platform server. Defense-in-depth fallbacks exist only for the case where
+  no registered layer produced a wire-valid response at all.
 - Malformed JSON request bodies surface as deterministic `400 Bad Request`
-  responses through the same error path — body parsing is the pipeline's
-  first step, so syntax errors flow through exception layers exactly like
-  platform `bodyParser` errors do.
+  responses through the same error path — body parsing is the first stack
+  layer, so syntax errors flow through exception layers exactly like platform
+  `bodyParser` errors do. Serialization failures of handler payloads (e.g.
+  circular structures) surface inside the route proxy and map through the
+  framework filters to the same opaque 500.
 
 ### 6.2 Asynchronous Message Queue
 
