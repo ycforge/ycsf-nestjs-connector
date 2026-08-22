@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { NormalizedHttpRequest } from "../http/normalized-request";
+import type { QueueBatch } from "../mq/message";
 import type { YandexExecutionContext } from "./yandex-execution-context";
 
 /**
@@ -20,6 +21,15 @@ export interface InvocationScopeState {
    * (AGENTS.md section 11).
    */
   readonly httpRequest?: NormalizedHttpRequest;
+
+  /**
+   * Normalized Message Queue delivery published by the claiming MQ transport
+   * before user code runs (issue #7). Absent for non-queue invocations;
+   * application code reads it through {@link resolveInvocationQueueBatch},
+   * mirroring how the HTTP request is resolved — never from module-level
+   * singletons (AGENTS.md section 11).
+   */
+  readonly queueBatch?: QueueBatch;
 }
 
 /**
@@ -107,4 +117,22 @@ export function resolveInvocationHttpRequest(): NormalizedHttpRequest {
     );
   }
   return state.httpRequest;
+}
+
+/**
+ * Resolves the current invocation's normalized Message Queue delivery.
+ *
+ * Internal seam consumed by queue dispatch (issue #8) and specs; deliberately
+ * not part of the public export surface yet, mirroring
+ * {@link resolveInvocationHttpRequest}. Fails loudly outside a queue
+ * invocation instead of returning an undefined batch typed as present.
+ */
+export function resolveInvocationQueueBatch(): QueueBatch {
+  const state = invocationStorage.getStore();
+  if (!state?.queueBatch) {
+    throw new Error(
+      "no Message Queue delivery is associated with the current invocation; only the Message Queue transport publishes one",
+    );
+  }
+  return state.queueBatch;
 }

@@ -3,12 +3,14 @@ import {
   getInvocationScopeState,
   resolveInvocationExecutionContext,
   resolveInvocationHttpRequest,
+  resolveInvocationQueueBatch,
   runInInvocationScope,
   type InvocationScopeState,
 } from "./invocation-scope";
 import { buildYandexExecutionContext } from "./build-yandex-execution-context";
 import type { NormalizedHttpRequest } from "../http/normalized-request";
 import type { RawHttpApiGatewayV2Event } from "../http/raw-event";
+import type { QueueBatch } from "../mq/message";
 
 /**
  * Specs for invocation-scoped context propagation (issue #4). AsyncLocalStorage
@@ -196,5 +198,68 @@ describe("invocation scope transport extension", () => {
       extendInvocationScope({ httpRequest: HTTP_REQUEST }, () => Promise.resolve()),
     ).toThrow(/can only be extended while handling a Yandex Cloud Function invocation/);
     expect(() => resolveInvocationHttpRequest()).toThrow(/no HTTP request is associated/);
+  });
+});
+
+describe("invocation scope queue delivery extension", () => {
+  const QUEUE_BATCH: QueueBatch = Object.freeze({
+    raw: Object.freeze({ messages: [] }),
+    messages: Object.freeze([]),
+  });
+
+  it("merges the queue delivery while keeping the execution context identity", async () => {
+    const state = stateFor("inv-queue-extend");
+
+    await runInInvocationScope(state, async () => {
+      await extendInvocationScope({ queueBatch: QUEUE_BATCH }, async () => {
+        expect(resolveInvocationQueueBatch()).toBe(QUEUE_BATCH);
+        // The context must survive the extension untouched and by reference.
+        expect(resolveInvocationExecutionContext()).toBe(state.executionContext);
+      });
+    });
+  });
+
+  it("does not leak a queue delivery into the outer invocation scope", async () => {
+    await runInInvocationScope(stateFor("inv-queue-nested"), async () => {
+      await extendInvocationScope({ queueBatch: QUEUE_BATCH }, () => Promise.resolve());
+
+      expect(getInvocationScopeState()?.queueBatch).toBeUndefined();
+    });
+  });
+
+  it("isolates concurrent queue deliveries interleaving on the same event loop", async () => {
+    const slowBatch = { ...QUEUE_BATCH, messages: [], raw: { messages: [] } } as QueueBatch;
+    const fastBatch = QUEUE_BATCH;
+    const observedDuringSlow: string[] = [];
+
+    await runInInvocationScope(stateFor("inv-queue-parent"), async () => {
+      const slowRun = extendInvocationScope({ queueBatch: slowBatch }, async () => {
+        await delay(20);
+        observedDuringSlow.push(String(resolveInvocationQueueBatch() === slowBatch));
+      });
+      const fastRun = extendInvocationScope({ queueBatch: fastBatch }, async () => {
+        await delay(1);
+        observedDuringSlow.push(String(resolveInvocationQueueBatch() === fastBatch));
+      });
+
+      // The parent scope never observes either child's delivery.
+      expect(getInvocationScopeState()?.queueBatch).toBeUndefined();
+
+      await Promise.all([slowRun, fastRun]);
+    });
+
+    expect(observedDuringSlow).toEqual(["true", "true"]);
+  });
+
+  it("fails to resolve the queue delivery when no transport published one", async () => {
+    await runInInvocationScope(stateFor("inv-no-queue"), () => Promise.resolve());
+
+    expect(() => resolveInvocationQueueBatch()).toThrow(/no Message Queue delivery/);
+  });
+
+  it("refuses to resolve a queue delivery outside any invocation", () => {
+    expect(() => resolveInvocationQueueBatch()).toThrow(
+      /no Message Queue delivery is associated with the current invocation/,
+    );
   });
 });
