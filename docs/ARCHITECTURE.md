@@ -111,12 +111,16 @@ export const handler; // consumed by the Yandex Cloud Function runtime
 ### 3.2 Cold start
 
 - On first invocation the core bootstraps the Nest application exactly once.
-- The bootstrap uses `NestFactory.createApplicationContext(AppModule)`, a
-  standalone application context: it builds the full dependency graph with no
-  HTTP listener and no platform adapter, so the package's only peers stay
-  `@nestjs/common`/`@nestjs/core`. (`NestFactory.create` would additionally
-  require `@nestjs/platform-express`; if the HTTP transport ever needs an
-  HTTP-bound application, switching is a deliberate decision of issues #5/#6.)
+- The bootstrap uses `NestFactory.create(AppModule, new YandexHttpAdapter())`
+  over the framework transport SPI (`AbstractHttpAdapter`), followed by
+  `app.init()`: Nest builds the full dependency graph and records routes,
+  middleware and body parsing with the connector's own adapter instead of an
+  HTTP listener. No socket is opened and no platform package
+  (`@nestjs/platform-express`) is required; the only peers stay
+  `@nestjs/common`/`@nestjs/core`. The adapter only records what Nest
+  registers — routing decisions, guards, interceptors, pipes, filters,
+  status defaults and exception mapping stay inside the framework's opaque
+  route proxies, which the dispatch layer replays per invocation.
 - Initialization is race-safe: a single shared initialization promise lives in
   the handler factory closure, so concurrent cold invocations await one
   instance instead of building duplicate applications (AGENTS.md §10.3). One
@@ -209,8 +213,42 @@ The registered HTTP adapter (`src/http/adapter.ts`) claims events whose
 `version === "2.0"` plus string `rawPath`/`rawQueryString` (**observed**
 discriminator), validates the full observed shape inside its dispatch, and
 publishes the normalized `NormalizedHttpRequest` into the invocation scope
-before user code runs; response mapping and controller dispatch are the
-response adapter's concern (issue #6).
+before user code runs. Controller dispatch then goes through the warm
+application itself: the transport resolves the application's HTTP adapter,
+verifies it is the connector's own (`YandexHttpAdapter`), and hands it the
+normalized request plus a fresh response facade.
+
+The SPI adapter is deliberately thin: during cold start it only _records_ the
+layers Nest registers through the framework transport SPI — the JSON body
+parser, functional middleware, per-route handler proxies, and the terminal
+not-found/error proxies — in registration order. Per invocation, the small
+dispatch pipeline replays that order (the router role Express would otherwise
+play): ordered scanning, prefix matching for mounts, full matching with
+parameter capture for routes, fallthrough via `next()`, and one error hop.
+Every recorded layer is an opaque `(req, res, next)` proxy built by NestJS, so
+guards, interceptors, pipes, filters, status defaults and exception mapping
+remain framework semantics — the connector neither reimplements nor inspects
+them. Response serialization maps the facade onto the
+`YandexFunctionHttpResponse` envelope (section 6.1).
+
+Because no real router validates route strings before they reach the adapter,
+the matcher defines an explicit compatibility contract (`src/http/
+path-matching.ts`), audited against what `@nestjs/core` 11 can hand over:
+
+- **Supported**: static segments; single-segment `:param` captures; tail
+  wildcards in every spelling Nest 11 / Express 5 era code produces (`/*`,
+  `/*name`, `/{*name}`, legacy `/(.*)`); the `/api$` exact-mount marker that
+  Nest's own `RouteInfoPathExtractor` emits for catch-all middleware under a
+  global prefix; trailing-slash normalization and case-insensitive comparison
+  like the platform default router. Controller/module/global prefixes and URI
+  version prefixes are plain literal composition upstream, so they work
+  unchanged; multi-path decorators arrive as separate registrations.
+- **Rejected at registration** with `ConnectorError` code
+  `UNSUPPORTED_ROUTE_PATTERN`: regular-expression or quantifier syntax
+  (`a(b)?c`, `:id(\d+)`), optional or brace-wrapped parameters (`:id?`,
+  `{:id}`), wildcards outside the final segment, and non-string paths. A
+  pattern outside the contract therefore fails cold start deterministically —
+  never silently misroutes.
 
 ## 5. Raw data preservation
 
@@ -244,13 +282,44 @@ async semantics.
 ### 6.1 Synchronous HTTP
 
 - Exceptions raised inside controllers/services are first-class NestJS
-  territory: normal exception filters and `HttpException` mapping produce the
-  HTTP response. The connector does not swallow or wrap them.
-- Failures escaping the Nest layer become a generic HTTP 500 produced by the
-  HTTP adapter. Stack traces and internals are never exposed to clients in
-  production mode (AGENTS.md §8.1).
-- The wire shape of success/error responses is owned by the HTTP adapter
-  (issues #5/#6); the contract envelope is `YandexFunctionHttpResponse`.
+  territory: every route is an opaque framework proxy, so normal exception
+  filters and `HttpException` mapping produce the HTTP response unchanged.
+  The connector does not swallow or wrap them.
+- Failures escaping every registered layer fall back to a deterministic,
+  opaque internal-server-error envelope (`statusCode` `500`,
+  `"Internal server error"`) mirroring the platform default; neither the error
+  message nor stack frames reach the client (AGENTS.md §8.1).
+- Success serialization maps the response facade onto
+  `YandexFunctionHttpResponse`. Transport policy is explicit and lives in
+  exactly two places: implicit content types are decided once, at
+  payload-write time in the response facade (`application/json` for JSON,
+  `text/plain; charset=utf-8` for strings, `application/octet-stream` for
+  buffers — an explicit handler-set `Content-Type` always wins), and body
+  encoding is decided once, in the serializer (strings stay plain UTF-8;
+  `Buffer` bodies become Base64 with `isBase64Encoded: true` so binary data is
+  never corrupted by string coercion). Single-value headers collapse to
+  strings; repeated values (e.g. multiple `Set-Cookie` appends) surface under
+  the `multiValueHeaders` field instead of being comma-joined.
+- `multiValueHeaders` is **observed** against the live API Gateway
+  payload-format-2.0 response path (2026-08-22, wire-level curl inspection of
+  a probe function): the gateway accepts the field, joins repeated ordinary
+  headers into one comma-separated wire line, and emits repeated `Set-Cookie`
+  values as separate header lines — preserving true multiplicity where
+  comma-joining would be lossy. When a name appears in both maps,
+  `multiValueHeaders` wins.
+- Framework router semantics are inherited rather than reimplemented:
+  unmatched requests reach Nest's own not-found proxy (`Cannot …` envelope),
+  `POST` routes default to `201 Created`, `HEAD` falls back to `GET`, and a
+  handler forwarding via `next()` falls through to later matching layers —
+  express router behavior the connector reproduces because it replaces the
+  platform server. Defense-in-depth fallbacks exist only for the case where
+  no registered layer produced a wire-valid response at all.
+- Malformed JSON request bodies surface as deterministic `400 Bad Request`
+  responses through the same error path — body parsing is the first stack
+  layer, so syntax errors flow through exception layers exactly like platform
+  `bodyParser` errors do. Serialization failures of handler payloads (e.g.
+  circular structures) surface inside the route proxy and map through the
+  framework filters to the same opaque 500.
 
 ### 6.2 Asynchronous Message Queue
 

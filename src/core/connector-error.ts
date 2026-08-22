@@ -60,4 +60,21 @@ export class ConnectorError extends Error {
       `transport "${transportId}" claimed the invocation event but rejected it as structurally invalid${suffix}`,
     );
   }
+
+  /**
+   * A route or middleware pattern outside the connector's documented matching
+   * subset was registered during cold start. Thrown at registration time so
+   * misconfiguration surfaces as a deterministic bootstrap failure instead of
+   * silent per-invocation misrouting (docs/ARCHITECTURE.md section 6.1).
+   *
+   * @param pattern offending path pattern, verbatim.
+   * @param reason optional value-free explanation of the unsupported syntax.
+   */
+  static unsupportedRoutePattern(pattern: string, reason?: string): ConnectorError {
+    const suffix = reason ? `: ${reason}` : "";
+    return new ConnectorError(
+      { code: "UNSUPPORTED_ROUTE_PATTERN" },
+      `unsupported route path pattern "${pattern}"${suffix}`,
+    );
+  }
 }

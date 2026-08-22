@@ -197,7 +197,20 @@ describe("http api gateway v2 transport validation", () => {
       RUNTIME_CONTEXT,
     );
 
-    expect(result).toEqual({ statusCode: 200, headers: {}, body: "", isBase64Encoded: false });
+    // The invocation completes through full dispatch; credentials never
+    // surface anywhere in the envelope (AGENTS.md section 6.2).
+    expect(result).toEqual({
+      statusCode: 404,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "Cannot GET /test/simple",
+        error: "Not Found",
+        statusCode: 404,
+      }),
+      isBase64Encoded: false,
+    });
+    expect(JSON.stringify(result)).not.toContain("SUPER-SECRET");
+    expect(JSON.stringify(result)).not.toContain("TOP-SECRET");
   });
 
   it("keeps credential and personal-data values out of validation diagnostics", async () => {
@@ -241,8 +254,22 @@ describe("http api gateway v2 transport dispatch behavior", () => {
   const runtimes: ClosableYandexCloudFunctionHandler[] = [];
   let bootstrapSpy: jest.SpyInstance;
 
+  // RootModule registers no controllers, so every fixture request ends at
+  // the not-found layer: the deterministic platform-shaped 404 envelope the
+  // NotFoundException filter produces.
+  const UNMATCHED_ROUTE_RESPONSE = {
+    statusCode: 404,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: "Cannot GET /test/simple",
+      error: "Not Found",
+      statusCode: 404,
+    }),
+    isBase64Encoded: false,
+  };
+
   beforeEach(() => {
-    bootstrapSpy = jest.spyOn(NestFactory, "createApplicationContext");
+    bootstrapSpy = jest.spyOn(NestFactory, "create");
   });
 
   afterEach(async () => {
@@ -263,12 +290,9 @@ describe("http api gateway v2 transport dispatch behavior", () => {
 
     const result = await runtime(makeHttpEvent(), RUNTIME_CONTEXT);
 
-    expect(result).toEqual({
-      statusCode: 200,
-      headers: {},
-      body: "",
-      isBase64Encoded: false,
-    });
+    // Without controllers the deterministic not-found envelope is the
+    // wire-valid outcome of a fully dispatched request (issue #6).
+    expect(result).toEqual(UNMATCHED_ROUTE_RESPONSE);
   });
 
   it("reuses one warm application across sequential HTTP invocations", async () => {
@@ -293,7 +317,7 @@ describe("http api gateway v2 transport dispatch behavior", () => {
 
     expect(results).toHaveLength(3);
     for (const result of results) {
-      expect(result).toEqual({ statusCode: 200, headers: {}, body: "", isBase64Encoded: false });
+      expect(result).toEqual(UNMATCHED_ROUTE_RESPONSE);
     }
     expect(bootstrapSpy).toHaveBeenCalledTimes(1);
   });
@@ -318,7 +342,12 @@ describe("http api gateway v2 transport dispatch behavior", () => {
           raw: {},
           toJSON: () => ({}),
         },
-        container: { resolve: () => Promise.reject(new Error("unused")) },
+        container: {
+          resolve: () => Promise.reject(new Error("unused")),
+          getApplication: () => {
+            throw new Error("unused");
+          },
+        },
       }),
     ).rejects.toThrow(/can only be extended while handling a Yandex Cloud Function invocation/);
   });

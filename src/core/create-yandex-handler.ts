@@ -1,7 +1,8 @@
-import type { INestApplicationContext, Type } from "@nestjs/common";
+import type { INestApplication, Type } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { buildYandexExecutionContext } from "../context/build-yandex-execution-context";
 import { runInInvocationScope } from "../context/invocation-scope";
+import { YandexHttpAdapter } from "../http/yandex-http-adapter";
 import { detectTransport } from "./detect-transport";
 import type {
   InjectableToken,
@@ -60,19 +61,28 @@ export function createInvocationRuntime(
   // Shared initialization promise in the factory closure: one cache per
   // created handler, never global state shared between unrelated handlers
   // (AGENTS.md sections 10.3 and 11).
-  let applicationPromise: Promise<INestApplicationContext> | null = null;
+  let applicationPromise: Promise<INestApplication> | null = null;
 
-  const getApplication = (): Promise<INestApplicationContext> => {
+  const getApplication = (): Promise<INestApplication> => {
     if (!applicationPromise) {
-      // Standalone application context: full dependency graph, no HTTP
-      // listener, no platform peer dependencies beyond @nestjs/core itself
-      // (`NestFactory.create` would require @nestjs/platform-express).
-      applicationPromise = NestFactory.createApplicationContext(appModule).catch((error) => {
-        // A failed cold start must not poison the environment forever:
-        // clear the promise so the next invocation retries initialization.
-        applicationPromise = null;
-        throw error;
-      });
+      // HTTP-bound application over the connector's in-memory adapter:
+      // controllers register through the transport SPI instead of a Node
+      // listener, so no @nestjs/platform-express is involved. Message Queue
+      // transports share the same warm application and resolve providers
+      // from it unchanged; the HTTP transport dispatches through the
+      // adapter's registered routes (issue #6, docs/ARCHITECTURE.md
+      // section 3.2). `init()` performs the full cold start once — module
+      // lifecycles, middleware, route registration — and warm invocations
+      // replay routes purely in memory.
+      const httpAdapter = new YandexHttpAdapter();
+      applicationPromise = NestFactory.create(appModule, httpAdapter)
+        .then((application) => application.init())
+        .catch((error) => {
+          // A failed cold start must not poison the environment forever:
+          // clear the promise so the next invocation retries initialization.
+          applicationPromise = null;
+          throw error;
+        });
     }
     return applicationPromise;
   };
@@ -120,13 +130,16 @@ export function createInvocationRuntime(
   });
 }
 
-function createInvocationContainer(application: INestApplicationContext): InvocationContainer {
+function createInvocationContainer(application: INestApplication): InvocationContainer {
   return {
     resolve<T>(token: InjectableToken<T>): Promise<T> {
       // `resolve` covers DEFAULT, REQUEST and TRANSIENT scopes alike; for
       // singletons it returns the shared instance (verified against
       // NestJS 11), keeping one resolution path for all provider scopes.
       return application.resolve<T>(token);
+    },
+    getApplication(): INestApplication {
+      return application;
     },
   };
 }

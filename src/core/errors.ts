@@ -6,7 +6,8 @@ import type { TransportId } from "./transport";
  * retry/acknowledgement semantics (issue #10); they must carry one of these
  * codes so applications can branch on stable identifiers instead of messages.
  */
-export type ConnectorErrorCode = "UNKNOWN_INVOCATION_EVENT" | "INVALID_INVOCATION_EVENT";
+export type ConnectorErrorCode =
+  "UNKNOWN_INVOCATION_EVENT" | "INVALID_INVOCATION_EVENT" | "UNSUPPORTED_ROUTE_PATTERN";
 
 /**
  * Diagnostic detail attached to boundary errors. Values must never contain
