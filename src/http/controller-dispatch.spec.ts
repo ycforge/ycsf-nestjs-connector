@@ -560,3 +560,135 @@ describe("framework semantics through the public runtime", () => {
     expect(JSON.parse(result.body as string)).toEqual({ received: { n: 5 } });
   });
 });
+
+class ItemsController {
+  // Declared before "byId": NestJS explores methods in class-declaration
+  // order (MetadataScanner over getOwnPropertyNames), so static multi-path
+  // routes must not sit behind the ":id" pattern.
+  shared(): object {
+    return { via: "multi" };
+  }
+
+  byId(id: string): object {
+    return { id };
+  }
+}
+
+Controller("items")(ItemsController);
+
+function itemsDescriptor(name: string): TypedPropertyDescriptor<unknown> {
+  const descriptor = Object.getOwnPropertyDescriptor(ItemsController.prototype, name);
+  if (!descriptor) {
+    throw new Error(`missing descriptor for ${name}`);
+  }
+  return descriptor;
+}
+
+// Static/multi-path registrations precede the parameterized route exactly
+// like on platform routers: first-match-wins over declaration order would
+// otherwise shadow them behind ":id".
+Get(["legacy", "renamed"])(ItemsController.prototype, "shared", itemsDescriptor("shared"));
+// NestJS flattens multi-path decorators into one registration per entry
+// (verified against @nestjs/core 11 RouterExplorer), so the matcher sees two
+// ordinary strings.
+Get(":id")(ItemsController.prototype, "byId", itemsDescriptor("byId"));
+Param("id")(ItemsController.prototype, "byId", 0);
+
+class RoutePatternModule {}
+Module({ controllers: [ItemsController] })(RoutePatternModule);
+
+const wildcardObservations: string[] = [];
+
+class WildcardObserver {
+  use(_requestFacade: unknown, _responseFacade: unknown, next: () => void): void {
+    wildcardObservations.push("seen");
+    next();
+  }
+}
+
+class WildcardModule {
+  configure(consumer: MiddlewareConsumer): void {
+    // forRoutes('*') is the canonical catch-all mount; without a global
+    // prefix Nest's extractor hands it to the adapter as "/*".
+    consumer.apply(WildcardObserver).forRoutes("*");
+  }
+}
+
+Module({ controllers: [ProbeController] })(WildcardModule);
+
+describe("route pattern compatibility through the public runtime", () => {
+  let runtime: ClosableYandexCloudFunctionHandler;
+
+  afterEach(async () => {
+    if (runtime) {
+      await runtime.close();
+    }
+  });
+
+  it("captures :param segments under a controller prefix", async () => {
+    runtime = createInvocationRuntime(RoutePatternModule, [httpApiGatewayV2Transport]);
+    const result = (await runtime(makeHttpEvent({ path: "/items/42" }), RUNTIME_CONTEXT)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body as string)).toEqual({ id: "42" });
+  });
+
+  it("serves every path of a multi-path decorator as an independent registration", async () => {
+    runtime = createInvocationRuntime(RoutePatternModule, [httpApiGatewayV2Transport]);
+
+    for (const path of ["/items/legacy", "/items/renamed"]) {
+      const result = (await runtime(makeHttpEvent({ path }), RUNTIME_CONTEXT)) as Record<
+        string,
+        unknown
+      >;
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body as string)).toEqual({ via: "multi" });
+    }
+  });
+
+  it("runs catch-all middleware mounts on matched and unmatched requests alike", async () => {
+    runtime = createInvocationRuntime(WildcardModule, [httpApiGatewayV2Transport]);
+    wildcardObservations.length = 0;
+
+    const matched = (await runtime(makeHttpEvent(), RUNTIME_CONTEXT)) as Record<string, unknown>;
+    const unmatched = (await runtime(
+      makeHttpEvent({ path: "/nowhere" }),
+      RUNTIME_CONTEXT,
+    )) as Record<string, unknown>;
+
+    // The observer ran for the matched ping and the unmatched request alike:
+    // mount matching is prefix-wide, not route-bound.
+    expect(wildcardObservations).toHaveLength(2);
+    expect(matched.statusCode).toBe(200);
+    expect(unmatched.statusCode).toBe(404);
+  });
+
+  it("fails cold start with UNSUPPORTED_ROUTE_PATTERN for regex-style route parameters", async () => {
+    class BrokenController {
+      byCode(): object {
+        return {};
+      }
+    }
+
+    Controller("broken")(BrokenController);
+    const descriptor = Object.getOwnPropertyDescriptor(BrokenController.prototype, "byCode");
+    if (!descriptor) {
+      throw new Error("missing descriptor for byCode");
+    }
+    Get(":code(\\d+)")(BrokenController.prototype, "byCode", descriptor);
+
+    class BrokenModule {}
+    Module({ controllers: [BrokenController] })(BrokenModule);
+
+    runtime = createInvocationRuntime(BrokenModule, [httpApiGatewayV2Transport]);
+
+    await expect(runtime(makeHttpEvent(), RUNTIME_CONTEXT)).rejects.toMatchObject({
+      name: "ConnectorError",
+      code: "UNSUPPORTED_ROUTE_PATTERN",
+      message: expect.stringContaining("/broken/:code(\\d+)"),
+    });
+  });
+});

@@ -1,19 +1,36 @@
+import { ConnectorError } from "../core/connector-error";
+
 /**
  * Route path matching for the in-memory dispatcher (issue #6).
  *
- * The connector replaces the platform router with a small segment matcher:
- * NestJS hands routes to {@link YandexHttpAdapter} as Express-style strings
- * (`/cats/:id`), and the matcher reproduces just enough of that contract for
- * conventional controllers — static segments, `:param` captures and a `*`
- * tail wildcard. Deliberate limitations (kept out until a real need shows up):
+ * The connector replaces the platform router with a small deterministic
+ * matcher. NestJS hands routes and middleware mounts to
+ * {@link YandexHttpAdapter} as plain strings composed from user decorators
+ * plus controller/module/global prefixes (verified against @nestjs/core 11
+ * `RoutePathFactory.create` and `RouteInfoPathExtractor.extractPathsFrom`);
+ * nothing validates the syntax before it arrives here. The supported subset
+ * below is therefore an explicit compatibility contract:
  *
- * - no regular-expression or optional/quantifier syntax (`a(b)?c`, `/:x?`);
- *   unsupported patterns fail fast at registration instead of misrouting;
- * - `*` only matches a whole tail and captures no parameter (Express binds it
- *   as `req.params[0]`; here wildcard routes expose no extra params);
- * - matching is case-insensitive like Express' default router;
- * - matching operates on the decoded `rawPath` (DATA-ANALYSE.md section E3),
- *   so an encoded `%2F` inside one segment behaves like a separator.
+ * **Supported patterns** — everything conventional NestJS controllers need:
+ * - static segments: `/cats`, `/users/profile`;
+ * - single-segment parameters: `/cats/:id`;
+ * - tail wildcards in every spelling Nest 11 / Express 5 era code produces:
+ *   `/*`, `/*name`, `/{*name}` and the legacy `/(.*)` mount form;
+ * - mount-exactness marker `/api$` (produced by Nest's own middleware path
+ *   extractor for `forRoutes('*')` under a global prefix): prefix matching
+ *   then requires full equality instead of a directory-prefix;
+ * - trailing slashes are ignored and comparison is case-insensitive,
+ *   mirroring the platform default router.
+ *
+ * **Rejected patterns** — fail fast at registration (cold start) with a
+ * {@link ConnectorError} of code `UNSUPPORTED_ROUTE_PATTERN` instead of
+ * silently misrouting: regular-expression or quantifier syntax (`a(b)?c`,
+ * `:id(\d+)`), optional or brace-wrapped parameters (`:id?`, `{:id}`), and
+ * wildcards outside the final segment. Non-string values (e.g. a RegExp
+ * passed to a route decorator) are rejected the same way.
+ *
+ * Matching operates on the decoded `rawPath` (DATA-ANALYSE.md section E3), so
+ * an encoded `%2F` inside one segment behaves like a separator.
  */
 
 export interface PathPatternMatch {
@@ -39,41 +56,75 @@ export interface CompiledPathPattern {
 
 const NO_PARAMS: Readonly<Record<string, string>> = Object.freeze({});
 
+const PARAM_NAME = /^[A-Za-z0-9_]+$/;
+
+/** Tail-wildcard spellings accepted verbatim; all behave identically. */
+const WILDCARD_SEGMENT = /^\*$|^\(\.\*\)$|^\*[A-Za-z0-9_]+$|^\{\*[A-Za-z0-9_]*\}$/;
+
 function splitSegments(path: string): string[] {
   // Trailing slashes never contribute a segment (Express normalizes them).
   const withoutTrailingSlash = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
   return withoutTrailingSlash.split("/").filter((segment) => segment.length > 0);
 }
 
-function parseSegment(raw: string): PatternSegment {
-  if (raw === "*") {
+function parseSegment(raw: string, pattern: string): PatternSegment {
+  if (WILDCARD_SEGMENT.test(raw)) {
     return { kind: "wildcard" };
   }
   if (raw.startsWith(":")) {
-    if (raw.length < 2 || raw.includes("?") || raw.includes("(")) {
-      throw new Error(
-        `unsupported route parameter "${raw}" in path pattern; only plain ":name" segments are supported`,
+    const name = raw.slice(1);
+    if (!PARAM_NAME.test(name)) {
+      throw ConnectorError.unsupportedRoutePattern(
+        pattern,
+        `parameter segment "${raw}" is not a plain ":name"; optional/regex parameters are not supported`,
       );
     }
-    return { kind: "param", name: raw.slice(1) };
+    return { kind: "param", name };
+  }
+  // Any regex/quantifier/brace syntax left in a literal segment would change
+  // meaning silently on the platforms this contract mirrors; refuse instead.
+  if (/[?(){}$:]/.test(raw)) {
+    throw ConnectorError.unsupportedRoutePattern(
+      pattern,
+      `segment "${raw}" uses unsupported syntax; only static text, ":name" and tail wildcards are supported`,
+    );
   }
   return { kind: "literal", value: raw };
 }
 
 /**
- * Compiles an Express-style path string. Throws on patterns outside the
- * supported subset so misconfiguration surfaces at cold start, not per
- * invocation.
+ * Compiles a route/mount path string. Throws a `ConnectorError` (code
+ * `UNSUPPORTED_ROUTE_PATTERN`) for anything outside the documented subset so
+ * misconfiguration surfaces at cold start, not per invocation.
  */
 export function compilePathPattern(pattern: string): CompiledPathPattern {
-  if (!pattern.startsWith("/")) {
-    throw new Error(`route path must start with "/": "${pattern}"`);
+  if (typeof pattern !== "string") {
+    throw ConnectorError.unsupportedRoutePattern(
+      String(pattern),
+      "route paths must be strings; array entries are registered separately by NestJS",
+    );
   }
-  const segments = splitSegments(pattern).map(parseSegment);
+
+  // Nest's RouteInfoPathExtractor appends "$" to mark mounts that must match
+  // the global prefix exactly rather than as a directory prefix.
+  let source = pattern;
+  let exactMount = false;
+  if (source.length > 1 && source.endsWith("$")) {
+    source = source.slice(0, -1);
+    exactMount = true;
+  }
+
+  if (!source.startsWith("/")) {
+    throw ConnectorError.unsupportedRoutePattern(pattern, 'route paths must start with "/"');
+  }
+  const segments = splitSegments(source).map((raw) => parseSegment(raw, pattern));
   let sawWildcard = false;
   for (const segment of segments) {
     if (sawWildcard) {
-      throw new Error(`route wildcard "*" must be the final segment: "${pattern}"`);
+      throw ConnectorError.unsupportedRoutePattern(
+        pattern,
+        "wildcard segments must be the final segment",
+      );
     }
     if (segment.kind === "wildcard") {
       sawWildcard = true;
@@ -82,6 +133,7 @@ export function compilePathPattern(pattern: string): CompiledPathPattern {
 
   return {
     source: pattern,
+
     match(path: string): PathPatternMatch {
       const requestSegments = splitSegments(path);
       const params: Record<string, string> = {};
@@ -111,6 +163,9 @@ export function compilePathPattern(pattern: string): CompiledPathPattern {
     },
 
     matchesPrefix(path: string): boolean {
+      if (exactMount) {
+        return segmentsEqual(splitSegments(source), splitSegments(path));
+      }
       if (segments.length === 0) {
         return true;
       }
@@ -123,14 +178,20 @@ export function compilePathPattern(pattern: string): CompiledPathPattern {
       // is allowed through.
       return segments.every((segment, index) => {
         const requestSegment = requestSegments[index]!;
-        if (segment.kind === "wildcard") {
-          return true;
-        }
-        if (segment.kind === "param") {
+        if (segment.kind === "wildcard" || segment.kind === "param") {
           return true;
         }
         return segment.value.toLowerCase() === requestSegment.toLowerCase();
       });
     },
   };
+}
+
+function segmentsEqual(patternSegments: string[], candidateSegments: string[]): boolean {
+  if (patternSegments.length !== candidateSegments.length) {
+    return false;
+  }
+  return patternSegments.every(
+    (segment, index) => segment.toLowerCase() === candidateSegments[index]!.toLowerCase(),
+  );
 }

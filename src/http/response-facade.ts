@@ -7,8 +7,8 @@
  * Header storage keeps insertion order and multiplicity per lowercased name:
  * single values serialize into the flat `headers` map of the wire envelope,
  * repeated appends (typically multiple `Set-Cookie` lines) go through the
- * provisional `multiValueHeaders` response field instead of being lossily
- * joined (see `response.ts` for the evidence level and verification status).
+ * verified `multiValueHeaders` response field instead of being lossily
+ * joined (see `response.ts` for the observed gateway behavior).
  */
 
 export interface HeaderEntry {

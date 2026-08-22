@@ -78,14 +78,14 @@ Yandex Function envelope: explicit handler-set content types always win
 `application/octet-stream`), `Buffer` bodies become Base64
 (`isBase64Encoded: true`) so binary data is never corrupted, and repeated
 header values (e.g. multiple `Set-Cookie`) surface under the optional
-`multiValueHeaders` field. **That field is provisional**: the observed Yandex
-dataset covers requests only, so responses accepting `multiValueHeaders`
-under payload format 2.0 still require live verification (see
-`src/http/response.ts`). Message Queue support (#7/#8) is not landed yet;
-deliveries no transport claims reject with `ConnectorError` code
-`UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
-`handler.close()` to release the cached application; the next invocation
-cold-starts again.
+`multiValueHeaders` field. That field is **live-verified** against the API
+Gateway payload-format-2.0 response path: the gateway accepts it, joins
+repeated ordinary headers with commas on the wire, and emits repeated
+`Set-Cookie` values as separate header lines (see `src/http/response.ts`).
+Message Queue support (#7/#8) is not landed yet; deliveries no transport
+claims reject with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT`.
+Environments requiring graceful teardown can call `handler.close()` to
+release the cached application; the next invocation cold-starts again.
 
 ## Architecture
 

@@ -15,15 +15,16 @@ export interface YandexFunctionHttpResponse {
    * lines); single-valued responses keep the exact four-field envelope
    * established before issue #6.
    *
-   * Evidence level: **provisional — pending live verification**. The captured
-   * dataset in DATA-ANALYSE.md covers invocation *requests* only (which show
-   * no `multiValueHeaders` counterpart), so whether payload-format-2.0
-   * *responses* accept this field is not observed. It exists because the
-   * alternative representations are worse: comma-joining repeated values is
-   * lossy (a comma is legal inside Set-Cookie attributes) and dropping them
-   * breaks multi-cookie responses. Per the documented proxy-integration
-   * behavior a header listed here overrides the same name in `headers`.
-   * Consumers relying on this field should verify it against a live function.
+   * Evidence level: **observed** against the live Yandex API Gateway
+   * payload-format-2.0 response path (2026-08-22, curl wire inspection).
+   * Verified behavior:
+   * - the gateway accepts this field on responses;
+   * - repeated ordinary headers are joined by the gateway into one
+   *   comma-separated wire line;
+   * - repeated `set-cookie` values are emitted as separate header lines,
+   *   preserving true multiplicity (comma-joining would be lossy — a comma
+   *   is legal inside Set-Cookie attributes);
+   * - when a name appears in both maps, `multiValueHeaders` wins.
    */
   readonly multiValueHeaders?: Readonly<Record<string, readonly string[]>>;
   /** Body payload encoded according to {@link isBase64Encoded}. */

@@ -231,6 +231,25 @@ remain framework semantics — the connector neither reimplements nor inspects
 them. Response serialization maps the facade onto the
 `YandexFunctionHttpResponse` envelope (section 6.1).
 
+Because no real router validates route strings before they reach the adapter,
+the matcher defines an explicit compatibility contract (`src/http/
+path-matching.ts`), audited against what `@nestjs/core` 11 can hand over:
+
+- **Supported**: static segments; single-segment `:param` captures; tail
+  wildcards in every spelling Nest 11 / Express 5 era code produces (`/*`,
+  `/*name`, `/{*name}`, legacy `/(.*)`); the `/api$` exact-mount marker that
+  Nest's own `RouteInfoPathExtractor` emits for catch-all middleware under a
+  global prefix; trailing-slash normalization and case-insensitive comparison
+  like the platform default router. Controller/module/global prefixes and URI
+  version prefixes are plain literal composition upstream, so they work
+  unchanged; multi-path decorators arrive as separate registrations.
+- **Rejected at registration** with `ConnectorError` code
+  `UNSUPPORTED_ROUTE_PATTERN`: regular-expression or quantifier syntax
+  (`a(b)?c`, `:id(\d+)`), optional or brace-wrapped parameters (`:id?`,
+  `{:id}`), wildcards outside the final segment, and non-string paths. A
+  pattern outside the contract therefore fails cold start deterministically —
+  never silently misroutes.
+
 ## 5. Raw data preservation
 
 Every normalized model carries its untouched source under `raw` via the
@@ -281,11 +300,13 @@ async semantics.
   never corrupted by string coercion). Single-value headers collapse to
   strings; repeated values (e.g. multiple `Set-Cookie` appends) surface under
   the `multiValueHeaders` field instead of being comma-joined.
-- `multiValueHeaders` is **provisional — pending live verification**: the
-  captured dataset covers request events only, so whether payload-format-2.0
-  responses accept this field is not observed. It preserves multiplicity that
-  would otherwise be lost lossily; consumers relying on it should verify it
-  against a live function.
+- `multiValueHeaders` is **observed** against the live API Gateway
+  payload-format-2.0 response path (2026-08-22, wire-level curl inspection of
+  a probe function): the gateway accepts the field, joins repeated ordinary
+  headers into one comma-separated wire line, and emits repeated `Set-Cookie`
+  values as separate header lines — preserving true multiplicity where
+  comma-joining would be lossy. When a name appears in both maps,
+  `multiValueHeaders` wins.
 - Framework router semantics are inherited rather than reimplemented:
   unmatched requests reach Nest's own not-found proxy (`Cannot …` envelope),
   `POST` routes default to `201 Created`, `HEAD` falls back to `GET`, and a
