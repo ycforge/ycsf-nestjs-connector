@@ -31,9 +31,9 @@ const REQUIRED_FILES = [...METADATA_FILES, "dist/index.js", "dist/index.d.ts"];
 const DIST_FILE_PATTERN = /^dist\/.+\.(js|js\.map|d\.ts|d\.ts\.map)$/;
 const FORBIDDEN_NAME_PATTERN = /(^|\/)([^/]*\bspec\b|\btest[^/]*|\.env[^/]*|authorized_key[^/]*)$/i;
 
-// Mirrors src/index.spec.ts: until runtime exports land (#3+), the public
-// surface is type-only, so the built entry must expose nothing at runtime.
-const EXPECTED_RUNTIME_EXPORTS = [];
+// Mirrors src/index.spec.ts: the runtime surface grows only deliberately
+// (docs/ARCHITECTURE.md section 7); issue #3 added the first value exports.
+const EXPECTED_RUNTIME_EXPORTS = ["ConnectorError", "createYandexHandler"];
 const FORBIDDEN_DEEP_IMPORTS = [
   "@ycforge/ycsf-nestjs-connector/dist/core/transport",
   "@ycforge/ycsf-nestjs-connector/dist/http/raw-event",
@@ -55,6 +55,20 @@ function run(command, args, options) {
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
   });
+}
+
+/**
+ * Environment for the standalone consumer checks. The scratch consumer
+ * installs only the packed tarball — peer dependencies stay undeclared by
+ * design (issue #2 contract) — while the runtime entry point now loads
+ * `@nestjs/core` (issue #3). Resolving peers from the repository checkout
+ * mirrors a real consumer environment (which always has the peers installed)
+ * without pulling the network into packaging validation. Node and tsc both
+ * honor NODE_PATH.
+ */
+function consumerEnv() {
+  const nodePath = path.join(repoRoot, "node_modules");
+  return { ...process.env, NODE_PATH: nodePath };
 }
 
 function packTarball() {
@@ -126,6 +140,20 @@ if (JSON.stringify(entryKeys) !== JSON.stringify([...expectedRuntimeExports].sor
   process.exit(1);
 }
 
+if (typeof entry.createYandexHandler !== "function") {
+  console.error("createYandexHandler must be a function");
+  process.exit(1);
+}
+if (typeof entry.ConnectorError !== "function") {
+  console.error("ConnectorError must be a constructable class");
+  process.exit(1);
+}
+const probeHandler = entry.createYandexHandler(class AppModule {});
+if (typeof probeHandler !== "function" || typeof probeHandler.close !== "function") {
+  console.error("createYandexHandler must return an invocable handler with close()");
+  process.exit(1);
+}
+
 for (const specifier of forbiddenDeepImports) {
   let caught = null;
   try {
@@ -140,7 +168,10 @@ for (const specifier of forbiddenDeepImports) {
 }
 `;
   writeFileSync(path.join(consumerDir, "runtime-check.cjs"), script);
-  run(process.execPath, [path.join(consumerDir, "runtime-check.cjs")], { cwd: consumerDir });
+  run(process.execPath, [path.join(consumerDir, "runtime-check.cjs")], {
+    cwd: consumerDir,
+    env: consumerEnv(),
+  });
 }
 
 const CONSUMER_TYPESCRIPT_OPTIONS = {
@@ -161,8 +192,10 @@ function runPositiveTypeCheck(consumerDir) {
   writeFileSync(
     path.join(consumerDir, "consumer-positive.ts"),
     [
+      'import { ConnectorError, createYandexHandler } from "@ycforge/ycsf-nestjs-connector";',
       "import type {",
       "  ConnectorErrorCode,",
+      "  ClosableYandexCloudFunctionHandler,",
       "  HasRaw,",
       "  NormalizedHttpRequest,",
       "  QueueBatch,",
@@ -204,6 +237,14 @@ function runPositiveTypeCheck(consumerDir) {
       "// without silent coercion (AGENTS.md section 5).",
       "export const memoryLimitInMB: string = executionContext.memoryLimitInMB;",
       "",
+      "// Runtime exports added by issue #3 must stay consumable through the",
+      "// packaged declarations, including the closable handler shape.",
+      "class AppModule {}",
+      "const yandexHandler: ClosableYandexCloudFunctionHandler = createYandexHandler(AppModule);",
+      "export const handlerClose: Promise<void> = yandexHandler.close();",
+      'export const boundaryError = ConnectorError.invalidInvocationEvent("http", "missing body");',
+      "export const boundaryErrorCode: ConnectorErrorCode = boundaryError.code;",
+      "",
     ].join("\n"),
   );
   writeFileSync(
@@ -222,7 +263,7 @@ function runPositiveTypeCheck(consumerDir) {
         "-p",
         "tsconfig-positive.json",
       ],
-      { cwd: consumerDir },
+      { cwd: consumerDir, env: consumerEnv() },
     );
   } catch (error) {
     const diagnostics = `${error.stdout ?? ""}\n${error.stderr ?? ""}`;
@@ -255,7 +296,7 @@ function runNegativeTypeCheck(consumerDir) {
         "-p",
         "tsconfig-negative.json",
       ],
-      { cwd: consumerDir },
+      { cwd: consumerDir, env: consumerEnv() },
     );
   } catch (error) {
     const diagnostics = `${error.stdout ?? ""}\n${error.stderr ?? ""}`;

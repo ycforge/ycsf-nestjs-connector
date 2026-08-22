@@ -1,0 +1,63 @@
+import type { ConnectorErrorCode, ConnectorErrorDetail } from "./errors";
+import type { TransportId } from "./transport";
+
+/**
+ * Concrete boundary error thrown by the connector runtime.
+ *
+ * Carries one of the stable {@link ConnectorErrorCode} identifiers so
+ * applications can branch on codes instead of messages (AGENTS.md section 8).
+ * Messages are composed from structural diagnostics only — never from payload
+ * values such as headers, tokens or bodies (AGENTS.md section 6.2).
+ */
+export class ConnectorError extends Error {
+  private constructor(
+    /** Structured description of the boundary failure; safe for logging. */
+    readonly detail: ConnectorErrorDetail,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ConnectorError";
+  }
+
+  /** Stable machine-readable identifier; mirrors {@link detail}.code. */
+  get code(): ConnectorErrorCode {
+    return this.detail.code;
+  }
+
+  /** Transport that produced the failure, when one had claimed the event. */
+  get transportId(): TransportId | undefined {
+    return this.detail.transportId;
+  }
+
+  /**
+   * No registered transport claimed the invocation event. Thrown by the core
+   * detection boundary (docs/ARCHITECTURE.md sections 4 and 6.3); unknown
+   * events are never silently treated as HTTP.
+   *
+   * @param diagnostic optional structural description of the received event
+   *   (value-free field names/types only).
+   */
+  static unknownInvocationEvent(diagnostic?: string): ConnectorError {
+    const suffix = diagnostic ? ` (${diagnostic})` : "";
+    return new ConnectorError(
+      { code: "UNKNOWN_INVOCATION_EVENT" },
+      `no registered transport adapter claimed the invocation event${suffix}`,
+    );
+  }
+
+  /**
+   * A transport claimed the event but its deeper structural validation
+   * failed (docs/ARCHITECTURE.md section 6.3). Raised by the owning
+   * transport's `invoke`, not by the detection boundary itself.
+   *
+   * @param transportId transport that claimed and rejected the event.
+   * @param reason optional value-free explanation of the violated structure.
+   */
+  static invalidInvocationEvent(transportId: TransportId, reason?: string): ConnectorError {
+    const suffix = reason ? `: ${reason}` : "";
+    return new ConnectorError(
+      { code: "INVALID_INVOCATION_EVENT", transportId },
+      `transport "${transportId}" claimed the invocation event but rejected it as structurally invalid${suffix}`,
+    );
+  }
+}
