@@ -6,6 +6,7 @@ import type {
   TransportId,
   TransportInvocation,
 } from "./transport";
+import type { YandexExecutionContext } from "../context/yandex-execution-context";
 
 /**
  * Fixtures implement the real TransportAdapter SPI with marker-based
@@ -25,6 +26,19 @@ interface FakeTransport extends TransportAdapter<FixtureEvent, string> {
 const UNUSED_CONTAINER: InvocationContainer = {
   resolve: () => Promise.reject(new Error("container resolution is not part of this scenario")),
 };
+
+const FIXTURE_EXECUTION_CONTEXT: YandexExecutionContext = Object.freeze({
+  awsRequestId: "req-fixture",
+  functionName: "fn-fixture",
+  functionVersion: "$LATEST",
+  functionFolderId: "folder-fixture",
+  memoryLimitInMB: "1024",
+  deadlineMs: 1771718400000,
+  logGroupName: "",
+  rawEvent: {},
+  raw: {},
+  toJSON: () => ({}),
+});
 
 function createFakeTransport(id: TransportId, claimedKind: string): FakeTransport {
   const invocations: TransportInvocation<FixtureEvent>[] = [];
@@ -79,6 +93,7 @@ describe("core transport detection boundary", () => {
       claimed.invoke({
         rawEvent: QUEUE_FIXTURE_EVENT,
         rawContext: null,
+        executionContext: FIXTURE_EXECUTION_CONTEXT,
         container: UNUSED_CONTAINER,
       }),
     ).resolves.toBe("message-queue:message-queue-trigger");
@@ -101,6 +116,7 @@ describe("core transport detection boundary", () => {
     await claimed.invoke({
       rawEvent: HTTP_FIXTURE_EVENT,
       rawContext: null,
+      executionContext: FIXTURE_EXECUTION_CONTEXT,
       container: UNUSED_CONTAINER,
     });
 

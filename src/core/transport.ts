@@ -9,6 +9,8 @@
  * the runtime that consumes them.
  */
 
+import type { YandexExecutionContext } from "../context/yandex-execution-context";
+
 /** Stable discriminator ids. Extending this union is the single registration point for a new transport. */
 export type TransportId = "http" | "message-queue";
 
@@ -43,6 +45,13 @@ export interface TransportInvocation<TRawEvent = unknown> {
   readonly rawEvent: TRawEvent;
   /** Raw function context; opaque to the core, interpreted only where needed. */
   readonly rawContext: unknown;
+  /**
+   * Normalized execution context built once per invocation by the core from
+   * the untouched event/context pair (issue #4). Identical abstraction for
+   * every transport, so correlation ids and trace metadata stay consistent
+   * across HTTP and Message Queue executions.
+   */
+  readonly executionContext: YandexExecutionContext;
   /** Access to the warm application container for handler resolution. */
   readonly container: InvocationContainer;
 }

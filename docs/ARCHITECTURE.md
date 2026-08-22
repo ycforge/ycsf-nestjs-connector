@@ -63,23 +63,26 @@ Visibility tiers:
   only the `"."` subpath, so deep imports of `dist/**` are blocked by the
   package resolver; internal modules may change at any time.
 
-| Module                                    | Visibility | Responsibility                                               |
-| ----------------------------------------- | ---------- | ------------------------------------------------------------ |
-| `src/core/transport.ts`                   | Public     | Transport SPI: adapter contract, handler type, container ref |
-| `src/core/raw-access.ts`                  | Public     | `HasRaw` mixin contract for lossless raw access              |
-| `src/core/errors.ts`                      | Public     | Error taxonomy codes for unknown/invalid invocations         |
-| `src/core/create-yandex-handler.ts`       | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)       |
-| `src/core/connector-error.ts`             | Public     | Concrete boundary error carrying the taxonomy codes (#3)     |
-| `src/core/detect-transport.ts`            | Internal   | Detection loop over the ordered adapter registry (#3)        |
-| `src/core/transports.ts`                  | Internal   | Ordered built-in adapter registry; registration point        |
-| `src/http/raw-event.ts`                   | Public     | Raw API Gateway v2 event shape (**observed**)                |
-| `src/http/normalized-request.ts`          | Public     | Normalized HTTP request contract                             |
-| `src/http/response.ts`                    | Public     | Function response envelope (**documented**)                  |
-| `src/mq/raw-event.ts`                     | Public     | Raw Message Queue trigger event shape (**observed**)         |
-| `src/mq/message.ts`                       | Public     | Normalized queue message/batch contracts                     |
-| `src/context/yandex-execution-context.ts` | Public     | Normalized execution context (**observed**)                  |
-| `src/decorators/decorator-contracts.ts`   | Public     | Signatures of the three decorators                           |
-| `src/http/*`, `src/mq/*` adapters         | Internal   | Behavior implementing the above contracts (#5–#8)            |
+| Module                                          | Visibility | Responsibility                                               |
+| ----------------------------------------------- | ---------- | ------------------------------------------------------------ |
+| `src/core/transport.ts`                         | Public     | Transport SPI: adapter contract, handler type, container ref |
+| `src/core/raw-access.ts`                        | Public     | `HasRaw` mixin contract for lossless raw access              |
+| `src/core/errors.ts`                            | Public     | Error taxonomy codes for unknown/invalid invocations         |
+| `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)       |
+| `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)     |
+| `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)        |
+| `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point        |
+| `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                |
+| `src/http/normalized-request.ts`                | Public     | Normalized HTTP request contract                             |
+| `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                  |
+| `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)         |
+| `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts                     |
+| `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                  |
+| `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)            |
+| `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                  |
+| `src/context/yandex-context.decorator.ts`       | Public     | `@YandexContext()` implementation (#4)                       |
+| `src/decorators/decorator-contracts.ts`         | Public     | Signatures of the three decorators                           |
+| `src/http/*`, `src/mq/*` adapters               | Internal   | Behavior implementing the above contracts (#5–#8)            |
 
 Rules:
 
@@ -143,6 +146,27 @@ it releases the cached application, is idempotent, performs nothing when no
 cold start happened yet, awaits an in-flight initialization before releasing
 it, and lets the next invocation perform a fresh cold start.
 
+### 3.5 Invocation-scoped execution context (#4)
+
+After detection claims an event, the core builds one
+`YandexExecutionContext` per invocation (`src/context/build-yandex-execution-context.ts`)
+from the untouched event/context pair and dispatches inside an
+AsyncLocalStorage scope (`src/context/invocation-scope.ts`). Consequences:
+
+- The context is transport-neutral: HTTP and Message Queue executions expose
+  the identical abstraction, including the same correlation id
+  (`awsRequestId`) and trace metadata.
+- `@YandexContext()` is a thin parameter registration; transports fill the
+  registered parameters from the invocation scope when dispatching to user
+  handlers (issues #5/#7/#8). Resolution outside an invocation fails loudly.
+- The scope exists only for the duration of one handler invocation: concurrent
+  invocations get isolated stores, sequential invocations never observe each
+  other's state (AGENTS.md §11), and nothing survives after completion.
+- The normalized context is frozen and carries a serialization guard
+  (`toJSON`) that redacts the IAM token and excludes raw payloads, so
+  accidental logging cannot leak credentials (AGENTS.md §6.2). Explicit
+  property access remains available as the escape hatch.
+
 ## 4. Transport detection
 
 Detection happens **once**, in the core, immediately after receiving the raw
@@ -185,6 +209,8 @@ Every normalized model carries its untouched source under `raw` via the
 - `QueueBatch.raw` / `QueueMessage.raw` → the raw trigger event / message.
 - `YandexExecutionContext.raw` → the entire raw function context, including
   undocumented fields such as `_data`.
+- `YandexExecutionContext.rawEvent` → the raw invocation event this context
+  belongs to (API Gateway v2 payload or Message Queue delivery).
 
 Consequences enforced by this rule:
 
@@ -265,15 +291,15 @@ Defined now (exported from `src/index.ts`):
 | `YandexFunctionHttpResponse`                                                                 | type  | Response envelope returned to the runtime            |
 | `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type  | Observed raw MQ event                                |
 | `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type  | Normalized MQ models                                 |
-| `YandexExecutionContext`                                                                     | type  | Normalized execution context                         |
+| `YandexExecutionContext`                                                                     | type  | Normalized execution context (**observed**)          |
 | `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type  | Decorator signatures                                 |
+| `YandexContext()`                                                                            | value | Parameter injection of the normalized context (#4)   |
 
 Planned runtime exports (implemented by their owning issues; adding them must
 not change these contracts):
 
 | Export                               | Issue |
 | ------------------------------------ | ----- |
-| `@YandexContext()`                   | #4    |
 | `@QueueHandler()`, `@QueueMessage()` | #8    |
 
 The runtime value exports are pinned in two places that must stay in sync with

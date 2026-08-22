@@ -111,12 +111,34 @@ describe("execution context contract", () => {
       logGroupName: "group-fixture",
       token: "REDACTED_TOKEN",
       uberTraceId: "trace-fixture",
+      rawEvent: {},
       raw: {},
+      toJSON: () => ({}),
     };
 
     const uncoercedLimit: string = executionContext.memoryLimitInMB;
 
     expect(uncoercedLimit).toBe("1024");
+  });
+
+  it("keeps the raw invocation event reachable as an explicit escape hatch", () => {
+    const rawEventFixture = { version: "2.0", rawPath: "/example" };
+    const executionContext: YandexExecutionContext = {
+      awsRequestId: "req-fixture",
+      functionName: "fn-fixture",
+      functionVersion: "$LATEST",
+      functionFolderId: "folder-fixture",
+      memoryLimitInMB: "1024",
+      deadlineMs: 1771718400000,
+      logGroupName: "",
+      rawEvent: rawEventFixture,
+      raw: {},
+      toJSON: () => ({}),
+    };
+
+    // The untouched event must survive normalization by reference, never
+    // merged or cloned away from advanced use cases (AGENTS.md section 7.3).
+    expect(executionContext.rawEvent).toBe(rawEventFixture);
   });
 });
 

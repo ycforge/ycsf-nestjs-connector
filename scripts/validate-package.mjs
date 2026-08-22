@@ -32,8 +32,9 @@ const DIST_FILE_PATTERN = /^dist\/.+\.(js|js\.map|d\.ts|d\.ts\.map)$/;
 const FORBIDDEN_NAME_PATTERN = /(^|\/)([^/]*\bspec\b|\btest[^/]*|\.env[^/]*|authorized_key[^/]*)$/i;
 
 // Mirrors src/index.spec.ts: the runtime surface grows only deliberately
-// (docs/ARCHITECTURE.md section 7); issue #3 added the first value exports.
-const EXPECTED_RUNTIME_EXPORTS = ["ConnectorError", "createYandexHandler"];
+// (docs/ARCHITECTURE.md section 7); issue #3 added the bootstrap, issue #4
+// the context decorator.
+const EXPECTED_RUNTIME_EXPORTS = ["ConnectorError", "createYandexHandler", "YandexContext"];
 const FORBIDDEN_DEEP_IMPORTS = [
   "@ycforge/ycsf-nestjs-connector/dist/core/transport",
   "@ycforge/ycsf-nestjs-connector/dist/http/raw-event",
@@ -148,6 +149,10 @@ if (typeof entry.ConnectorError !== "function") {
   console.error("ConnectorError must be a constructable class");
   process.exit(1);
 }
+if (typeof entry.YandexContext !== "function") {
+  console.error("YandexContext must be a decorator factory function");
+  process.exit(1);
+}
 const probeHandler = entry.createYandexHandler(class AppModule {});
 if (typeof probeHandler !== "function" || typeof probeHandler.close !== "function") {
   console.error("createYandexHandler must return an invocable handler with close()");
@@ -192,7 +197,7 @@ function runPositiveTypeCheck(consumerDir) {
   writeFileSync(
     path.join(consumerDir, "consumer-positive.ts"),
     [
-      'import { ConnectorError, createYandexHandler } from "@ycforge/ycsf-nestjs-connector";',
+      'import { ConnectorError, createYandexHandler, YandexContext } from "@ycforge/ycsf-nestjs-connector";',
       "import type {",
       "  ConnectorErrorCode,",
       "  ClosableYandexCloudFunctionHandler,",
@@ -236,6 +241,22 @@ function runPositiveTypeCheck(consumerDir) {
       "// The observed string form of memoryLimitInMB must survive packaging",
       "// without silent coercion (AGENTS.md section 5).",
       "export const memoryLimitInMB: string = executionContext.memoryLimitInMB;",
+      "",
+      "// Issue #4 surface: raw event escape hatch, redaction-safe automatic",
+      "// serialization and the context parameter decorator.",
+      "export const rawEventEscapeHatch: unknown = executionContext.rawEvent;",
+      "export const serializedContext: Record<string, unknown> = JSON.parse(JSON.stringify(executionContext));",
+      "",
+      "// Applied imperatively (exactly what legacy decorator desugaring does),",
+      "// mirroring how the repository specs exercise decorators without relying",
+      "// on decorator compilation settings of the consumer toolchain.",
+      "class ContextConsumer {",
+      "  handle(executionContext: YandexExecutionContext): string {",
+      "    return executionContext.awsRequestId;",
+      "  }",
+      "}",
+      "const consumer = new ContextConsumer();",
+      'YandexContext()(consumer, "handle", 0);',
       "",
       "// Runtime exports added by issue #3 must stay consumable through the",
       "// packaged declarations, including the closable handler shape.",
