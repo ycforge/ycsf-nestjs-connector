@@ -68,6 +68,10 @@ Visibility tiers:
 | `src/core/transport.ts`                   | Public     | Transport SPI: adapter contract, handler type, container ref |
 | `src/core/raw-access.ts`                  | Public     | `HasRaw` mixin contract for lossless raw access              |
 | `src/core/errors.ts`                      | Public     | Error taxonomy codes for unknown/invalid invocations         |
+| `src/core/create-yandex-handler.ts`       | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)       |
+| `src/core/connector-error.ts`             | Public     | Concrete boundary error carrying the taxonomy codes (#3)     |
+| `src/core/detect-transport.ts`            | Internal   | Detection loop over the ordered adapter registry (#3)        |
+| `src/core/transports.ts`                  | Internal   | Ordered built-in adapter registry; registration point        |
 | `src/http/raw-event.ts`                   | Public     | Raw API Gateway v2 event shape (**observed**)                |
 | `src/http/normalized-request.ts`          | Public     | Normalized HTTP request contract                             |
 | `src/http/response.ts`                    | Public     | Function response envelope (**documented**)                  |
@@ -75,7 +79,6 @@ Visibility tiers:
 | `src/mq/message.ts`                       | Public     | Normalized queue message/batch contracts                     |
 | `src/context/yandex-execution-context.ts` | Public     | Normalized execution context (**observed**)                  |
 | `src/decorators/decorator-contracts.ts`   | Public     | Signatures of the three decorators                           |
-| `src/core/*` (future runtime)             | Internal   | Detection loop, bootstrap, caching (issue #3)                |
 | `src/http/*`, `src/mq/*` adapters         | Internal   | Behavior implementing the above contracts (#5–#8)            |
 
 Rules:
@@ -90,26 +93,35 @@ Rules:
 
 ### 3.1 Entry point
 
-The single runtime entry point will be:
+The single runtime entry point is:
 
 ```ts
 const handler = createYandexHandler(AppModule);
 export const handler; // consumed by the Yandex Cloud Function runtime
 ```
 
-`createYandexHandler` returns a `YandexCloudFunctionHandler`
-(`(rawEvent, rawContext) => Promise<unknown>`) — the exact signature the
-function runtime invokes. Contract: `src/core/transport.ts`. Implementation:
-issue #3.
+`createYandexHandler` returns a `ClosableYandexCloudFunctionHandler`: the exact
+`YandexCloudFunctionHandler` call signature the function runtime invokes
+(`(rawEvent, rawContext) => Promise<unknown>`) plus a `close()` teardown hook
+(section 3.4). Contract: `src/core/transport.ts`. Implementation: issue #3.
 
 ### 3.2 Cold start
 
-- On first invocation the core bootstraps the Nest application once
-  (`NestFactory.create` with no HTTP listener binding beyond what transports
-  need).
-- Initialization is race-safe: a single shared initialization promise is
-  stored in module scope, so concurrent cold invocations await one instance
-  instead of building two applications (AGENTS.md §10.3).
+- On first invocation the core bootstraps the Nest application exactly once.
+- The bootstrap uses `NestFactory.createApplicationContext(AppModule)`, a
+  standalone application context: it builds the full dependency graph with no
+  HTTP listener and no platform adapter, so the package's only peers stay
+  `@nestjs/common`/`@nestjs/core`. (`NestFactory.create` would additionally
+  require `@nestjs/platform-express`; if the HTTP transport ever needs an
+  HTTP-bound application, switching is a deliberate decision of issues #5/#6.)
+- Initialization is race-safe: a single shared initialization promise lives in
+  the handler factory closure, so concurrent cold invocations await one
+  instance instead of building duplicate applications (AGENTS.md §10.3). One
+  cache exists per created handler — never global state shared between
+  unrelated handlers.
+- A failed cold start is **not** cached as a permanent failure: the promise is
+  cleared on rejection so the next invocation retries initialization. All
+  concurrent callers of the failed attempt receive the same bootstrap error.
 
 ### 3.3 Warm invocations
 
@@ -119,6 +131,17 @@ issue #3.
   is created per invocation and passed explicitly. No singleton may hold
   `currentEvent`/`currentContext`/`currentMessage` state between invocations
   (AGENTS.md §11); tests must prove isolation across sequential invocations.
+
+### 3.4 Shutdown
+
+Yandex Cloud Functions freezes or reclaims execution environments without
+guaranteed teardown signals, so the connector registers no automatic shutdown
+hooks and deliberately keeps the application alive for warm invocations until
+the environment dies with it. Environments where graceful teardown is required
+(custom runtimes, integration tests) call `close()` on the returned handler:
+it releases the cached application, is idempotent, performs nothing when no
+cold start happened yet, awaits an in-flight initialization before releasing
+it, and lets the next invocation perform a fresh cold start.
 
 ## 4. Transport detection
 
@@ -146,8 +169,12 @@ Discriminators (**observed**):
   structure checks — no heavyweight schema library (AGENTS.md §9).
 
 Adding a future transport means writing a new internal adapter module,
-extending the `TransportId` union in one place, and registering it in the
-core's ordered adapter list. The application layer does not change.
+extending the `TransportId` union in one place, and registering it in
+`src/core/transports.ts`'s ordered adapter list. The application layer does
+not change. Until issues #5/#7 register their adapters there, the built-in
+registry is empty and every invocation fails with `UNKNOWN_INVOCATION_EVENT`
+— an honest rejection, never half-working behavior. Detection also precedes
+initialization: events nobody claims never trigger a Nest cold start.
 
 ## 5. Raw data preservation
 
@@ -208,41 +235,50 @@ Two error codes are reserved at the runtime boundary (`src/core/errors.ts`):
 | `UNKNOWN_INVOCATION_EVENT` | No transport claimed the event (diagnostic, non-secret detail) |
 | `INVALID_INVOCATION_EVENT` | A claiming transport failed deeper structural validation       |
 
-Concrete error classes and redaction utilities land with issues #3 and #13;
-they must implement these codes.
+Concrete error classes: `ConnectorError` (issue #3) implements both codes and
+is thrown at the detection boundary; transports raise
+`INVALID_INVOCATION_EVENT` from their own validation. Redaction utilities for
+diagnostics land with issue #13; error messages carry structural information
+only (field names, never payload values).
 
 ## 7. Public API surface
 
 Explicit list. Everything not listed here is internal.
 
-Defined now (type-only contracts, exported from `src/index.ts`):
+Defined now (exported from `src/index.ts`):
 
-| Export                                                                                       | Kind | Purpose                                     |
-| -------------------------------------------------------------------------------------------- | ---- | ------------------------------------------- |
-| `YandexCloudFunctionHandler`                                                                 | type | Signature the function runtime calls        |
-| `TransportAdapter`                                                                           | type | SPI each transport implements               |
-| `TransportInvocation`                                                                        | type | Per-invocation input handed to a transport  |
-| `TransportId`                                                                                | type | Stable transport discriminator ids          |
-| `InvocationContainer`                                                                        | type | Read-only provider resolution over warm app |
-| `InjectableToken`                                                                            | type | Token accepted by `InvocationContainer`     |
-| `HasRaw`                                                                                     | type | Raw-preservation mixin                      |
-| `ConnectorErrorCode`                                                                         | type | Reserved boundary error codes               |
-| `RawHttpApiGatewayV2Event` (+ context types)                                                 | type | Observed raw HTTP event                     |
-| `NormalizedHttpRequest`                                                                      | type | Canonical normalized request                |
-| `YandexFunctionHttpResponse`                                                                 | type | Response envelope returned to the runtime   |
-| `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type | Observed raw MQ event                       |
-| `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type | Normalized MQ models                        |
-| `YandexExecutionContext`                                                                     | type | Normalized execution context                |
-| `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type | Decorator signatures                        |
+| Export                                                                                       | Kind  | Purpose                                              |
+| -------------------------------------------------------------------------------------------- | ----- | ---------------------------------------------------- |
+| `createYandexHandler`                                                                        | value | Central entry point: module -> function handler (#3) |
+| `ClosableYandexCloudFunctionHandler`                                                         | type  | Handler plus `close()` teardown hook (#3)            |
+| `ConnectorError`                                                                             | value | Boundary error carrying the taxonomy codes (#3)      |
+| `YandexCloudFunctionHandler`                                                                 | type  | Signature the function runtime calls                 |
+| `TransportAdapter`                                                                           | type  | SPI each transport implements                        |
+| `TransportInvocation`                                                                        | type  | Per-invocation input handed to a transport           |
+| `TransportId`                                                                                | type  | Stable transport discriminator ids                   |
+| `InvocationContainer`                                                                        | type  | Read-only provider resolution over warm app          |
+| `InjectableToken`                                                                            | type  | Token accepted by `InvocationContainer`              |
+| `HasRaw`                                                                                     | type  | Raw-preservation mixin                               |
+| `ConnectorErrorCode`                                                                         | type  | Reserved boundary error codes                        |
+| `RawHttpApiGatewayV2Event` (+ context types)                                                 | type  | Observed raw HTTP event                              |
+| `NormalizedHttpRequest`                                                                      | type  | Canonical normalized request                         |
+| `YandexFunctionHttpResponse`                                                                 | type  | Response envelope returned to the runtime            |
+| `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type  | Observed raw MQ event                                |
+| `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type  | Normalized MQ models                                 |
+| `YandexExecutionContext`                                                                     | type  | Normalized execution context                         |
+| `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type  | Decorator signatures                                 |
 
 Planned runtime exports (implemented by their owning issues; adding them must
 not change these contracts):
 
 | Export                               | Issue |
 | ------------------------------------ | ----- |
-| `createYandexHandler`                | #3    |
 | `@YandexContext()`                   | #4    |
 | `@QueueHandler()`, `@QueueMessage()` | #8    |
+
+The runtime value exports are pinned in two places that must stay in sync with
+this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
+`scripts/validate-package.mjs`.
 
 ## 8. Extension points
 

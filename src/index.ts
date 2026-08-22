@@ -12,6 +12,11 @@
  * - never re-export whole modules or use wildcard barrels.
  */
 
+// Core: runtime entry point and boundary error.
+export { createYandexHandler } from "./core/create-yandex-handler";
+export type { ClosableYandexCloudFunctionHandler } from "./core/create-yandex-handler";
+export { ConnectorError } from "./core/connector-error";
+
 // Core: transport SPI and shared invocation contracts.
 export type {
   InjectableToken,

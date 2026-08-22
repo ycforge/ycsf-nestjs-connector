@@ -12,12 +12,31 @@ The package is intentionally a thin runtime/transport adapter: it must not turn
 NestJS into a Yandex-specific application framework. Business logic stays
 independent of Yandex Cloud whenever practical.
 
-> **Status: architecture defined, runtime in progress.** The package
+> **Status: runtime bootstrap landed, transports in progress.** The package
 > architecture and public contracts are established (see
-> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and the type-only exports of
-> [`src/index.ts`](./src/index.ts)); transport behavior is implemented
-> incrementally. Observed Yandex Cloud runtime constraints that all connector
-> code must respect are catalogued in [AGENTS.md](./AGENTS.md).
+> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and
+> [`src/index.ts`](./src/index.ts)); the central function factory ships with
+> issue #3 and transport behavior is implemented incrementally (HTTP #5/#6,
+> Message Queue #7/#8). Observed Yandex Cloud runtime constraints that all
+> connector code must respect are catalogued in [AGENTS.md](./AGENTS.md).
+
+## Usage
+
+```ts
+import { createYandexHandler } from "@ycforge/ycsf-nestjs-connector";
+import { AppModule } from "./app.module";
+
+// Bootstraps Nest lazily on the first invocation, then reuses the cached
+// application for every warm invocation.
+const handler = createYandexHandler(AppModule);
+
+export default { handler };
+```
+
+Until the transport adapters land (#5–#8), no built-in transport claims events
+yet: invocations reject with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT`.
+Environments requiring graceful teardown can call `handler.close()` to release
+the cached application; the next invocation cold-starts again.
 
 ## Architecture
 
