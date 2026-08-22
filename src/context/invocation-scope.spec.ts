@@ -1,10 +1,14 @@
 import {
+  extendInvocationScope,
   getInvocationScopeState,
   resolveInvocationExecutionContext,
+  resolveInvocationHttpRequest,
   runInInvocationScope,
   type InvocationScopeState,
 } from "./invocation-scope";
 import { buildYandexExecutionContext } from "./build-yandex-execution-context";
+import type { NormalizedHttpRequest } from "../http/normalized-request";
+import type { RawHttpApiGatewayV2Event } from "../http/raw-event";
 
 /**
  * Specs for invocation-scoped context propagation (issue #4). AsyncLocalStorage
@@ -106,5 +110,91 @@ describe("invocation scope", () => {
     await expect(
       runInInvocationScope(stateFor("inv-fail"), () => Promise.reject(failure)),
     ).rejects.toBe(failure);
+  });
+});
+
+describe("invocation scope transport extension", () => {
+  const HTTP_REQUEST: NormalizedHttpRequest = Object.freeze({
+    raw: {} as RawHttpApiGatewayV2Event,
+    httpVersion: "2.0",
+    method: "GET",
+    path: "/fixture",
+    rawQueryString: "",
+    searchParams: new URLSearchParams(),
+    queryStringParameters: Object.freeze({}),
+    multiValueParameters: Object.freeze({}),
+    pathParameters: Object.freeze({}),
+    parameters: Object.freeze({}),
+    headers: Object.freeze({}),
+    sourceIp: "203.0.113.10",
+    userAgent: "fixture-agent/1.0",
+    body: null,
+    requestId: "req-fixture",
+  });
+
+  it("merges the extension while keeping the execution context identity", async () => {
+    const state = stateFor("inv-extend");
+
+    await runInInvocationScope(state, async () => {
+      await extendInvocationScope({ httpRequest: HTTP_REQUEST }, async () => {
+        expect(resolveInvocationHttpRequest()).toBe(HTTP_REQUEST);
+        // The context must survive the extension untouched and by reference.
+        expect(resolveInvocationExecutionContext()).toBe(state.executionContext);
+      });
+    });
+  });
+
+  it("keeps the extended request reachable across async boundaries", async () => {
+    await runInInvocationScope(stateFor("inv-async"), async () => {
+      await extendInvocationScope({ httpRequest: HTTP_REQUEST }, async () => {
+        await delay(1);
+        expect(getInvocationScopeState()?.httpRequest).toBe(HTTP_REQUEST);
+      });
+    });
+  });
+
+  it("does not leak an extension into the outer invocation scope", async () => {
+    await runInInvocationScope(stateFor("inv-nested"), async () => {
+      await extendInvocationScope({ httpRequest: HTTP_REQUEST }, () => Promise.resolve());
+
+      expect(getInvocationScopeState()?.httpRequest).toBeUndefined();
+    });
+  });
+
+  it("isolates concurrent extensions interleaving on the same event loop", async () => {
+    const slowRequest: NormalizedHttpRequest = { ...HTTP_REQUEST, requestId: "req-slow" };
+    const fastRequest: NormalizedHttpRequest = { ...HTTP_REQUEST, requestId: "req-fast" };
+    const observedDuringSlow: string[] = [];
+
+    await runInInvocationScope(stateFor("inv-parent"), async () => {
+      const slowRun = extendInvocationScope({ httpRequest: slowRequest }, async () => {
+        await delay(20);
+        observedDuringSlow.push(resolveInvocationHttpRequest().requestId);
+      });
+      const fastRun = extendInvocationScope({ httpRequest: fastRequest }, async () => {
+        await delay(1);
+        observedDuringSlow.push(resolveInvocationHttpRequest().requestId);
+      });
+
+      // The parent scope never observes either child's extension.
+      expect(getInvocationScopeState()?.httpRequest).toBeUndefined();
+
+      await Promise.all([slowRun, fastRun]);
+    });
+
+    expect(observedDuringSlow).toEqual(["req-fast", "req-slow"]);
+  });
+
+  it("fails to resolve the http request when no transport published one", async () => {
+    await runInInvocationScope(stateFor("inv-no-http"), () => Promise.resolve());
+
+    expect(() => resolveInvocationHttpRequest()).toThrow(/no HTTP request is associated/);
+  });
+
+  it("refuses to extend outside any invocation with an actionable diagnostic", () => {
+    expect(() =>
+      extendInvocationScope({ httpRequest: HTTP_REQUEST }, () => Promise.resolve()),
+    ).toThrow(/can only be extended while handling a Yandex Cloud Function invocation/);
+    expect(() => resolveInvocationHttpRequest()).toThrow(/no HTTP request is associated/);
   });
 });

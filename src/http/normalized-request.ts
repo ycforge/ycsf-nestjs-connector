@@ -46,6 +46,16 @@ export interface NormalizedHttpRequest extends HasRaw<RawHttpApiGatewayV2Event> 
   readonly headers: Readonly<Record<string, string>>;
 
   /**
+   * Client IP from `requestContext.http.sourceIp`, verbatim (**observed**).
+   * Personal data: never log it through connector diagnostics (AGENTS.md
+   * section 6.2); applications decide whether and how to use it.
+   */
+  readonly sourceIp: string;
+
+  /** User agent from `requestContext.http.userAgent` (observed; duplicates the User-Agent header). */
+  readonly userAgent: string;
+
+  /**
    * Decoded body bytes; decoded according to `event.isBase64Encoded`, never
    * guessed from Content-Type. `null` for empty/absent bodies. Binary-safe:
    * no implicit text or JSON conversion happens here.

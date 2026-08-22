@@ -69,6 +69,8 @@ describe("normalized HTTP request contract", () => {
       multiValueParameters: {},
       pathParameters: {},
       headers: {},
+      sourceIp: "203.0.113.10",
+      userAgent: "fixture-agent",
       body: null,
       requestId: "req-id-fixture",
     };

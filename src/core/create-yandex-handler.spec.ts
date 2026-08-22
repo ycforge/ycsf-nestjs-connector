@@ -136,6 +136,34 @@ function makeRuntimeContext(awsRequestId: string): Record<string, unknown> {
   };
 }
 
+/**
+ * Minimal observed-shape API Gateway v2 event (DATA-ANALYSE.md section B):
+ * every field the HTTP transport (#5) validates is present with placeholder
+ * values only — no captured credentials or client data.
+ */
+function makeObservedHttpEvent(): Record<string, unknown> {
+  return {
+    version: "2.0",
+    rawPath: "/fixture",
+    rawQueryString: "",
+    headers: { Accept: "*/*", Host: "fixture.local" },
+    queryStringParameters: {},
+    requestContext: {
+      authorizer: {},
+      http: { method: "GET", path: "/fixture?", sourceIp: "203.0.113.10", userAgent: "fixture" },
+      requestId: "f18fed85-7096-4f0e-a6db-e2c5e37e925f",
+      time: "21/Aug/2026:16:16:30 +0000",
+      timeEpoch: 1787328990,
+    },
+    body: "",
+    isBase64Encoded: true,
+    pathParameters: {},
+    parameters: {},
+    multiValueParameters: {},
+    operationId: "41cf33042e33".padEnd(64, "0"),
+  };
+}
+
 async function capturedRejection(promise: Promise<unknown>): Promise<unknown> {
   try {
     await promise;
@@ -389,15 +417,25 @@ describe("core invocation runtime lifecycle", () => {
       const handler = createYandexHandler(RootModule);
       runtimes.push(handler);
 
-      // Until the HTTP (#5) and MQ (#7) adapters register themselves in the
-      // core's ordered registry, no transport claims any event — the shipped
-      // contract is a clear UNKNOWN_INVOCATION_EVENT failure, never
-      // half-working behavior.
+      // The built-in registry ships with the HTTP / API Gateway adapter
+      // (issue #5); Message Queue follows with issue #7. An event no
+      // transport claims must still fail clearly instead of being guessed
+      // as one of the known kinds (AGENTS.md section 8.3).
       const failure = await capturedRejection(
         handler(HTTP_EVENT, makeRuntimeContext("inv-public")),
       );
       expectConnectorErrorCode(failure, "UNKNOWN_INVOCATION_EVENT");
       expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("routes a realistic API Gateway v2 event through the full public lifecycle", async () => {
+      const handler = createYandexHandler(RootModule);
+      runtimes.push(handler);
+
+      const result = await handler(makeObservedHttpEvent(), makeRuntimeContext("inv-public-http"));
+
+      expect(result).toEqual({ statusCode: 200, headers: {}, body: "", isBase64Encoded: false });
+      expect(createSpy).toHaveBeenCalledTimes(1);
     });
   });
 });
