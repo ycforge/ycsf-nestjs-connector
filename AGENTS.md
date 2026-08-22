@@ -172,6 +172,13 @@ Do not build a second dependency-injection system.
 
 The following runtime behavior was experimentally observed and must not be accidentally changed.
 
+> The full evidence base for these facts — an exhaustive path-level schema analysis of
+> 97 captured invocations (46 HTTP / API Gateway, 51 Message Queue), including field
+> presence, types, variability, examples and anomalies — is maintained in
+> [`DATA-ANALYSE.md`](./DATA-ANALYSE.md).
+> When this document and `DATA-ANALYSE.md` disagree on a low-level runtime detail,
+> treat `DATA-ANALYSE.md` as the more detailed record of what was actually observed.
+
 ## 4.1 HTTP event
 
 The observed HTTP event has this shape:
@@ -911,6 +918,9 @@ query params
 ---
 
 # 15. Testing captured Yandex events
+
+The original capture archive is not stored in this repository; the distilled,
+sanitized facts derived from it are recorded in [`DATA-ANALYSE.md`](./DATA-ANALYSE.md).
 
 When adding a captured fixture:
 
