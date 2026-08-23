@@ -25,7 +25,7 @@
             "attributes": {
               "ApproximateFirstReceiveTimestamp": "1787348695107",
               "ApproximateReceiveCount": "1",
-              "SenderId": "ymqsender000000001",
+              "SenderId": "ymqsender000000001@as",
               "SentTimestamp": "1787348694067"
             },
             "message_attributes": {},
@@ -67,7 +67,7 @@
               "attributes": {
                 "ApproximateFirstReceiveTimestamp": "1787348695107",
                 "ApproximateReceiveCount": "1",
-                "SenderId": "ymqsender000000001",
+                "SenderId": "ymqsender000000001@as",
                 "SentTimestamp": "1787348694067"
               },
               "message_attributes": {},

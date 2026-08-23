@@ -104,9 +104,9 @@ HTTP (`fixtures/http/`):
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `get-without-query`               | bodiless GET still arrives `isBase64Encoded: true`; trailing `?` on rebuilt path                                                         |
 | `catch-all-path-parameters`       | gateway-wide `ID` parameter carries the whole subpath                                                                                    |
-| `repeated-query-parameters`       | comma join in `queryStringParameters`, list in `multiValueParameters`, alphabetical rebuild + trailing `?` on `requestContext.http.path` |
-| `url-encoded-query-values`        | decoded query values incl. Unicode/emoji/reserved characters, lowercase percent hex on rebuild                                           |
-| `encoded-path-characters`         | encoded `?` decodes into `rawPath`; routing must use `rawPath`/`rawQueryString`                                                          |
+| `repeated-query-parameters`       | comma join in `queryStringParameters`, list in `multiValueParameters`, reordered rebuild (gateway-declared order), no trailing `?` while a query exists |
+| `url-encoded-query-values`        | decoded query values incl. Unicode/emoji/reserved characters, lowercase percent hex and `+`-for-space rewrite on rebuild (as captured for `/curl-data`) |
+| `encoded-path-characters`         | decoded `%3F` truncates `rawPath`; rebuilt path keeps the decoded form; routing must use `rawPath`                                                      |
 | `custom-headers-and-cookies`      | custom headers survive; declared cookie/header parameters exposed                                                                        |
 | `json-body-plain-utf8`            | only `application/json` bodies arrive plain (`isBase64Encoded: false`)                                                                   |
 | `plain-text-body-base64`          | other text types are Base64                                                                                                              |

@@ -58,7 +58,9 @@
       "ID": "probe/ping"
     },
     "multiValueParameters": {
-      "ID": ["probe/ping"]
+      "ID": [
+        "probe/ping"
+      ]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -73,7 +75,7 @@
     "deadlineMs": 1787348679166,
     "logGroupName": "",
     "token": "[REDACTED]",
-    "uberTraceId": "19fcffb9e777c3fb:5bb6aa5c66657d30:06d027ab0322c8c9:1",
+    "uberTraceId": "19fcffb9e777c3fb:03d75666c5aa6bb5:9c8c2230ba720d60:1",
     "_data": {
       "version": "2.0",
       "rawPath": "/probe/ping",
@@ -127,7 +129,9 @@
         "ID": "probe/ping"
       },
       "multiValueParameters": {
-        "ID": ["probe/ping"]
+        "ID": [
+          "probe/ping"
+        ]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

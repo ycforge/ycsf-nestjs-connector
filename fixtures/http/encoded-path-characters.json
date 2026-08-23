@@ -7,7 +7,7 @@
   },
   "event": {
     "version": "2.0",
-    "rawPath": "/probe/with space/and/encoded?chars",
+    "rawPath": "/probe/with space/and/encoded",
     "rawQueryString": "x=1",
     "headers": {
       "Accept": "*/*",
@@ -54,15 +54,15 @@
     "body": "",
     "isBase64Encoded": true,
     "pathParameters": {
-      "ID": "probe/with space/and/encoded?chars"
+      "ID": "probe/with space/and/encoded"
     },
     "parameters": {
-      "ID": "probe/with space/and/encoded?chars",
-      "x": "1"
+      "ID": "probe/with space/and/encoded"
     },
     "multiValueParameters": {
-      "ID": ["probe/with space/and/encoded?chars"],
-      "x": ["1"]
+      "ID": [
+        "probe/with space/and/encoded"
+      ]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -77,10 +77,10 @@
     "deadlineMs": 1787348689277,
     "logGroupName": "",
     "token": "[REDACTED]",
-    "uberTraceId": "afe00aa11cd5256e:c4b94e23fa5d130c:ea60ac8a41bee5cf:1",
+    "uberTraceId": "afe00aa11cd5256e:c031d5af32e49b4c:fc5eeb14a8ca06ae:1",
     "_data": {
       "version": "2.0",
-      "rawPath": "/probe/with space/and/encoded?chars",
+      "rawPath": "/probe/with space/and/encoded",
       "rawQueryString": "x=1",
       "headers": {
         "Accept": "*/*",
@@ -127,15 +127,15 @@
       "body": "",
       "isBase64Encoded": true,
       "pathParameters": {
-        "ID": "probe/with space/and/encoded?chars"
+        "ID": "probe/with space/and/encoded"
       },
       "parameters": {
-        "ID": "probe/with space/and/encoded?chars",
-        "x": "1"
+        "ID": "probe/with space/and/encoded"
       },
       "multiValueParameters": {
-        "ID": ["probe/with space/and/encoded?chars"],
-        "x": ["1"]
+        "ID": [
+          "probe/with space/and/encoded"
+        ]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

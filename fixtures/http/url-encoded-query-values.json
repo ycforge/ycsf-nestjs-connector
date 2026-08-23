@@ -37,7 +37,7 @@
       "authorizer": {},
       "http": {
         "method": "GET",
-        "path": "/probe/query?emoji=%f0%9f%98%80&phrase=hello+world&punct=%2f%3f%26%3d%25%23%2b&text=%d1%82%d0%b5%d1%81%d1%82?",
+        "path": "/probe/query?emoji=%f0%9f%98%80&phrase=hello+world&punct=%2f%3f%26%3d%25%23%2b&text=%d1%82%d0%b5%d1%81%d1%82",
         "sourceIp": "203.0.113.10",
         "userAgent": "conformance-fixture/1.0"
       },
@@ -65,9 +65,15 @@
       "punct": "/?&=%#+"
     },
     "multiValueParameters": {
-      "ID": ["probe/query"],
-      "text": ["тест"],
-      "punct": ["/?&=%#+"]
+      "ID": [
+        "probe/query"
+      ],
+      "text": [
+        "тест"
+      ],
+      "punct": [
+        "/?&=%#+"
+      ]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -82,7 +88,7 @@
     "deadlineMs": 1787348686000,
     "logGroupName": "",
     "token": "[REDACTED]",
-    "uberTraceId": "5487a63150674aa7:601fdeee331cc6f3:9c6de963c233aec9:1",
+    "uberTraceId": "5487a63150674aa7:3f6cc133eeedf106:9cea332c369ed6c9:1",
     "_data": {
       "version": "2.0",
       "rawPath": "/probe/query",
@@ -115,7 +121,7 @@
         "authorizer": {},
         "http": {
           "method": "GET",
-          "path": "/probe/query?emoji=%f0%9f%98%80&phrase=hello+world&punct=%2f%3f%26%3d%25%23%2b&text=%d1%82%d0%b5%d1%81%d1%82?",
+          "path": "/probe/query?emoji=%f0%9f%98%80&phrase=hello+world&punct=%2f%3f%26%3d%25%23%2b&text=%d1%82%d0%b5%d1%81%d1%82",
           "sourceIp": "203.0.113.10",
           "userAgent": "conformance-fixture/1.0"
         },
@@ -143,9 +149,15 @@
         "punct": "/?&=%#+"
       },
       "multiValueParameters": {
-        "ID": ["probe/query"],
-        "text": ["тест"],
-        "punct": ["/?&=%#+"]
+        "ID": [
+          "probe/query"
+        ],
+        "text": [
+          "тест"
+        ],
+        "punct": [
+          "/?&=%#+"
+        ]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

@@ -216,6 +216,8 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     for (const value of Object.values(message.attributes)) {
       expect(typeof value).toBe("string");
     }
+    // Observed SenderId shape: "<sender-id>@as".
+    expect(message.attributes.SenderId).toMatch(/^[0-9a-z]+@as$/);
     // Observed relation: ISO created_at equals the epoch-millisecond
     // SentTimestamp attribute; ApproximateReceiveCount starts at "1"
     // (observed constant across the capture dataset).

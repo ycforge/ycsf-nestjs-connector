@@ -66,9 +66,15 @@
       "test_cookie": "cookie-value"
     },
     "multiValueParameters": {
-      "ID": ["probe/ping"],
-      "X-Test-Header": ["header-value"],
-      "test_cookie": ["cookie-value"]
+      "ID": [
+        "probe/ping"
+      ],
+      "X-Test-Header": [
+        "header-value"
+      ],
+      "test_cookie": [
+        "cookie-value"
+      ]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -83,7 +89,7 @@
     "deadlineMs": 1787348692412,
     "logGroupName": "",
     "token": "[REDACTED]",
-    "uberTraceId": "e0d67d210a8c517b:d6239ddc15f74958:b9e0e75f1e4e9bba:1",
+    "uberTraceId": "e0d67d210a8c517b:85947f51cdd9326d:abb9e4e1f57e0e9b:1",
     "_data": {
       "version": "2.0",
       "rawPath": "/probe/ping",
@@ -145,9 +151,15 @@
         "test_cookie": "cookie-value"
       },
       "multiValueParameters": {
-        "ID": ["probe/ping"],
-        "X-Test-Header": ["header-value"],
-        "test_cookie": ["cookie-value"]
+        "ID": [
+          "probe/ping"
+        ],
+        "X-Test-Header": [
+          "header-value"
+        ],
+        "test_cookie": [
+          "cookie-value"
+        ]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

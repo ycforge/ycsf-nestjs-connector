@@ -35,7 +35,7 @@
       "authorizer": {},
       "http": {
         "method": "GET",
-        "path": "/probe/query?flag=on&multi=one&multi=two&multi=three?",
+        "path": "/probe/query?flag=on&multi=one&multi=two&multi=three",
         "sourceIp": "203.0.113.10",
         "userAgent": "conformance-fixture/1.0"
       },
@@ -63,9 +63,17 @@
       "flag": "on"
     },
     "multiValueParameters": {
-      "ID": ["probe/query"],
-      "multi": ["one", "two", "three"],
-      "flag": ["on"]
+      "ID": [
+        "probe/query"
+      ],
+      "multi": [
+        "one",
+        "two",
+        "three"
+      ],
+      "flag": [
+        "on"
+      ]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -80,7 +88,7 @@
     "deadlineMs": 1787348683633,
     "logGroupName": "",
     "token": "[REDACTED]",
-    "uberTraceId": "6417a1dbe40b0f8f:115dff97a2127184:1f64feff7fc7fd9e:1",
+    "uberTraceId": "6417a1dbe40b0f8f:4817212a79ffd511:e9df7cf7ffef46f1:1",
     "_data": {
       "version": "2.0",
       "rawPath": "/probe/query",
@@ -111,7 +119,7 @@
         "authorizer": {},
         "http": {
           "method": "GET",
-          "path": "/probe/query?flag=on&multi=one&multi=two&multi=three?",
+          "path": "/probe/query?flag=on&multi=one&multi=two&multi=three",
           "sourceIp": "203.0.113.10",
           "userAgent": "conformance-fixture/1.0"
         },
@@ -139,9 +147,17 @@
         "flag": "on"
       },
       "multiValueParameters": {
-        "ID": ["probe/query"],
-        "multi": ["one", "two", "three"],
-        "flag": ["on"]
+        "ID": [
+          "probe/query"
+        ],
+        "multi": [
+          "one",
+          "two",
+          "three"
+        ],
+        "flag": [
+          "on"
+        ]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

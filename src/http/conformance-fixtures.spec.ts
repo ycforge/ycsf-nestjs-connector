@@ -138,21 +138,44 @@ describe("HTTP conformance fixtures (issue #11)", () => {
   });
 
   it("routes on rawPath even when the gateway rebuilt requestContext.http.path", async () => {
-    // get-without-query carries httpPath "/probe/ping?" (trailing ?, an
-    // observed rebuild quirk); the encoded-path fixture carries a decoded "?"
-    // INSIDE its path. Both must route by rawPath; requestContext.http.path
-    // stays untouched pass-through.
+    // get-without-query carries httpPath "/probe/ping?" (the observed trailing
+    // "?" appears exactly when the canonical query string is empty); the
+    // encoded-path fixture shows a decoded "%3F" TRUNCATING rawPath. Both must
+    // route by rawPath; requestContext.http.path stays untouched pass-through.
     const trailing = await replay("get-without-query");
     expect(trailing.fixture.event.requestContext.http.path).toBe("/probe/ping?");
     expect(trailing.captured.normalizedRequest.path).toBe(trailing.fixture.event.rawPath);
 
     const encoded = await replay("encoded-path-characters");
-    // Observed hazard: the encoded ? decodes INTO rawPath.
-    expect(encoded.fixture.event.rawPath).toContain("?");
-    expect(encoded.captured.normalizedRequest.path).toBe(encoded.fixture.event.rawPath);
-    expect(encoded.fixture.event.requestContext.http.path).not.toBe(
-      encoded.captured.normalizedRequest.path,
-    );
+    // Observed hazard: the decoded "%3F" cuts rawPath at that point, while the
+    // rebuilt requestContext.http.path keeps the full decoded form (with the
+    // doubled "?") and the catch-all parameter stops before it.
+    expect(encoded.fixture.event.rawPath).toBe("/probe/with space/and/encoded");
+    expect(encoded.fixture.event.requestContext.http.path).toContain("?chars?x=");
+    expect(encoded.captured.normalizedRequest.path).toBe("/probe/with space/and/encoded");
+    expect(encoded.fixture.event.pathParameters.ID).not.toContain("?");
+  });
+
+  it("shares only the trace segment between context.uberTraceId and the Uber-Trace-Id header", async () => {
+    // Observed across all HTTP captures: the context trace id reuses the
+    // header's trace segment while its span/parent segments always differ —
+    // never a verbatim copy of the header.
+    for (const name of ALL_HTTP_FIXTURE_NAMES) {
+      const fixture = await loadHttpFixture(name);
+      const contextTraceId = fixture.context.uberTraceId;
+      if (typeof contextTraceId !== "string") {
+        throw new Error(`Fixture "${name}" must carry a string context.uberTraceId.`);
+      }
+      const headerTraceId = fixture.event.headers["Uber-Trace-Id"];
+      if (typeof headerTraceId !== "string") {
+        throw new Error(`Fixture "${name}" must carry an Uber-Trace-Id header.`);
+      }
+      const [headerTrace, headerSpan, headerParent] = headerTraceId.split(":");
+      const [contextTrace, contextSpan, contextParent] = contextTraceId.split(":");
+      expect(contextTrace).toBe(headerTrace);
+      expect(contextSpan).not.toBe(headerSpan);
+      expect(contextParent).not.toBe(headerParent);
+    }
   });
 
   it("preserves repeated query parameters in both gateway representations", async () => {
