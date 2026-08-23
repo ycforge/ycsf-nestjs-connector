@@ -55,7 +55,8 @@ export const messageQueueTransport: TransportAdapter<RawQueueEvent, QueueBatch> 
     // (@YandexContext()), isolated per invocation (AGENTS.md section 11).
     // Handler dispatch (issue #8) runs INSIDE this same scope: discovery is a
     // one-time static walk of the warm container, execution resolves handler
-    // instances per invocation and publishes each message as an immutable
+    // instances per message under one shared DI sub-tree (so REQUEST/TRANSIENT
+    // lifecycles stay per delivery) and publishes each message as an immutable
     // scope extension, and failures propagate verbatim — never converted to
     // HTTP-like results — so Message Queue retry/dead-letter behavior stays
     // effective. The untouched batch remains the deterministic transport

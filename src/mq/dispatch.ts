@@ -1,9 +1,11 @@
 import type { INestApplication } from "@nestjs/common";
+import { ContextIdFactory } from "@nestjs/core";
 import {
   extendInvocationScope,
   resolveInvocationExecutionContext,
 } from "../context/invocation-scope";
 import { getYandexContextParameterIndexes } from "../context/yandex-context.decorator";
+import type { InvocationResolutionContext } from "../core/transport";
 import { ConnectorError } from "../core/connector-error";
 import { getQueueHandlerMethodNames } from "./queue-handler.decorator";
 import { getQueueMessageParameterIndexes } from "./queue-message.decorator";
@@ -51,7 +53,7 @@ interface NestInstanceWrapper {
 
 /** Minimal view over the per-invocation container seam (src/core/transport.ts). */
 interface HandlerResolutionContainer {
-  resolve<T>(token: unknown): Promise<T>;
+  resolve<T>(token: unknown, resolutionContext?: InvocationResolutionContext): Promise<T>;
 }
 
 /** One discovered handler registration: which provider, which method. */
@@ -59,8 +61,12 @@ export interface DiscoveredQueueHandler {
   /**
    * Injection token of the owning provider, exactly as registered in the
    * NestJS container (class, string or symbol). Resolution goes through the
-   * invocation's {@link HandlerResolutionContainer}, so DEFAULT, REQUEST and
-   * TRANSIENT provider scopes all behave as they would on any other platform.
+   * invocation's {@link HandlerResolutionContainer} once per message under a
+   * shared DI sub-tree: DEFAULT-scoped providers return their cached
+   * singleton, REQUEST-scoped ones are instantiated fresh per message yet
+   * stay consistent across every handler of that message, and TRANSIENT
+   * ones refresh with each message's sub-tree — platform-standard NestJS
+   * semantics throughout.
    */
   readonly token: unknown;
   /** Property key of the decorated method on the resolved instance. */
@@ -203,15 +209,26 @@ function discoverOnWrapper(
  * - **Per-message isolation**: each handler round runs inside an immutable
  *   scope extension carrying exactly that message (`@QueueMessage()`), on
  *   top of the invocation scope holding the delivery and execution context
- *   (`@YandexContext()`). No module-level state carries the current message.
+ *   (`@YandexContext()`). No module-level state carries the current message,
+ *   and handler instances are resolved INSIDE that extension, so NestJS
+ *   provider state can never leak across messages of one delivery.
+ * - **One DI sub-tree per message**: all handlers of one round resolve under
+ *   a single NestJS context id (`ContextIdFactory.create()`), so
+ *   REQUEST-scoped providers are instantiated fresh per message yet observed
+ *   consistently by every handler call of that message — mirroring how a
+ *   platform request shares one DI sub-tree. The framework caches per-context
+ *   instances weakly (verified against @nestjs/core 11): dropping the context
+ *   id after the round lets the collector reclaim it, keeping warm processes
+ *   flat in memory. DEFAULT-scoped providers stay cached singletons;
+ *   TRANSIENT-scoped ones refresh with each message's new sub-tree.
  * - **Fan-out**: EVERY discovered handler receives EVERY message, in
  *   discovery order; handler return values are ignored — the queue transport
  *   has no response envelope, and acknowledgement/retry policy belongs to
  *   issue #10.
- * - **Failure propagation**: any handler failure rejects the whole
- *   invocation immediately; messages after the failing one are not attempted.
- *   Yandex Message Queue retry/dead-letter configuration therefore sees a
- *   failed invocation, never a swallowed error (AGENTS.md section 8.2).
+ * - **Failure propagation**: any resolution or handler failure rejects the
+ *   whole invocation immediately; messages after the failing one are not
+ *   attempted. Yandex Message Queue retry/dead-letter configuration therefore
+ *   sees a failed invocation, never a swallowed error (AGENTS.md section 8.2).
  */
 export async function dispatchQueueHandlers(
   invocationContainer: HandlerResolutionContainer,
@@ -222,30 +239,34 @@ export async function dispatchQueueHandlers(
     throw ConnectorError.noQueueHandler();
   }
 
-  // One resolution per invocation: request-scoped providers get one instance
-  // per delivery (a trigger delivery IS the request), singletons stay shared
-  // across warm invocations, transients refresh per delivery. Failures during
-  // resolution propagate exactly like handler failures.
-  const resolved = await Promise.all(
-    handlers.map(async (handler) => ({
-      instance: await invocationContainer.resolve(handler.token),
-      methodName: handler.methodName,
-    })),
-  );
-
   for (const message of batch.messages) {
     await extendInvocationScope({ queueMessage: message }, () =>
-      invokeAllHandlers(resolved, message),
+      deliverToAllHandlers(invocationContainer, handlers, message),
     );
   }
 }
 
-async function invokeAllHandlers(
-  resolved: readonly { instance: unknown; methodName: string | symbol }[],
+async function deliverToAllHandlers(
+  invocationContainer: HandlerResolutionContainer,
+  handlers: readonly DiscoveredQueueHandler[],
   message: QueueMessage,
 ): Promise<void> {
-  const executionContext = resolveInvocationExecutionContext();
+  // One DI sub-tree per message, created inside this message's scope
+  // extension so REQUEST/TRANSIENT provider lifecycles are bound to exactly
+  // that message. Sequential resolution keeps factory side effects ordered
+  // and stops at the first failure without starting later sub-trees.
+  const resolutionContext: InvocationResolutionContext = {
+    contextId: ContextIdFactory.create(),
+  };
+  const resolved: { instance: unknown; methodName: string | symbol }[] = [];
+  for (const handler of handlers) {
+    resolved.push({
+      instance: await invocationContainer.resolve(handler.token, resolutionContext),
+      methodName: handler.methodName,
+    });
+  }
 
+  const executionContext = resolveInvocationExecutionContext();
   for (const { instance, methodName } of resolved) {
     const method = readHandlerMethod(instance, methodName);
     const parameters = buildHandlerParameters(instance, methodName, message, executionContext);

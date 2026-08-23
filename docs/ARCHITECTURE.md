@@ -275,12 +275,19 @@ discovered handler receives EVERY delivered message, sequentially in delivery
 order, each round inside an immutable scope extension carrying exactly that
 message (`@QueueMessage()` resolves per message while `@YandexContext()`
 keeps resolving the invocation context). Handler instances resolve through
-the invocation's container view, so DEFAULT/REQUEST/TRANSIENT provider scopes
-behave exactly as on any other platform. Handler return values are ignored —
-a queue delivery has no response envelope — and successful dispatch returns
-the normalized batch unchanged. Deliveries are normalized as a batch
-regardless of the current trigger's grouped-message limit of 1 (**observed**)
-— nothing hard-codes that limit.
+the invocation's container view once per message, under one DI sub-tree
+created for that message (a `ContextId` from `@nestjs/core`
+`ContextIdFactory`, verified against @nestjs/core 11): DEFAULT-scoped
+providers keep their cached singleton, REQUEST-scoped providers are
+instantiated fresh for every message yet stay consistent across every
+handler call of that message — mirroring one platform request — and
+TRANSIENT providers refresh with each message's sub-tree. Per-context
+instances live in framework `WeakMap`s keyed by the throwaway context id,
+so warm processes do not accumulate state across invocations. Handler
+return values are ignored — a queue delivery has no response envelope — and
+successful dispatch returns the normalized batch unchanged. Deliveries are
+normalized as a batch regardless of the current trigger's grouped-message
+limit of 1 (**observed**) — nothing hard-codes that limit.
 
 ## 5. Raw data preservation
 

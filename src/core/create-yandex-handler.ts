@@ -7,6 +7,7 @@ import { detectTransport } from "./detect-transport";
 import type {
   InjectableToken,
   InvocationContainer,
+  InvocationResolutionContext,
   TransportAdapter,
   TransportInvocation,
   YandexCloudFunctionHandler,
@@ -132,11 +133,18 @@ export function createInvocationRuntime(
 
 function createInvocationContainer(application: INestApplication): InvocationContainer {
   return {
-    resolve<T>(token: InjectableToken<T>): Promise<T> {
+    resolve<T>(
+      token: InjectableToken<T>,
+      resolutionContext?: InvocationResolutionContext,
+    ): Promise<T> {
       // `resolve` covers DEFAULT, REQUEST and TRANSIENT scopes alike; for
       // singletons it returns the shared instance (verified against
       // NestJS 11), keeping one resolution path for all provider scopes.
-      return application.resolve<T>(token);
+      // An explicit context id groups several resolutions into one DI
+      // sub-tree (Message Queue dispatch shares one per message); without
+      // one, `application.resolve` creates a throwaway sub-tree per call —
+      // the pre-#8-lifecycle behavior, unchanged for HTTP-era callers.
+      return application.resolve<T>(token, resolutionContext?.contextId);
     },
     getApplication(): INestApplication {
       return application;

@@ -1,4 +1,4 @@
-import { Module, type Type } from "@nestjs/common";
+import { Injectable, Module, Scope, type Type } from "@nestjs/common";
 import {
   createYandexHandler,
   type ClosableYandexCloudFunctionHandler,
@@ -118,11 +118,137 @@ Module({ providers: [RecordingConsumer] })(RecordingModule);
 class FailingModule {}
 Module({ providers: [FailingConsumer] })(FailingModule);
 
+/**
+ * Provider-lifecycle fixtures (real NestJS scopes, no decorator compilation
+ * involved): instance ids come from one shared counter so specs can observe
+ * exactly when Nest creates a new instance. Statics are reset per spec.
+ */
+let lifecycleInstanceCounter = 0;
+
+interface LifecycleRound {
+  messageId?: string;
+  requestId?: string;
+  instanceId: number;
+}
+
+class RequestScopedConsumer {
+  static readonly rounds: LifecycleRound[] = [];
+
+  readonly instanceId = ++lifecycleInstanceCounter;
+
+  handle(message: QueueMessage, executionContext: YandexExecutionContext): void {
+    RequestScopedConsumer.rounds.push({
+      messageId: message?.messageId,
+      requestId: executionContext?.awsRequestId,
+      instanceId: this.instanceId,
+    });
+  }
+}
+Injectable({ scope: Scope.REQUEST })(RequestScopedConsumer);
+QueueHandler()(
+  RequestScopedConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(RequestScopedConsumer.prototype, "handle")!,
+);
+QueueMessage()(RequestScopedConsumer.prototype, "handle", 0);
+YandexContext()(RequestScopedConsumer.prototype, "handle", 1);
+
+class TransientScopedConsumer {
+  static readonly rounds: LifecycleRound[] = [];
+
+  readonly instanceId = ++lifecycleInstanceCounter;
+
+  handle(message: QueueMessage): void {
+    TransientScopedConsumer.rounds.push({
+      messageId: message?.messageId,
+      instanceId: this.instanceId,
+    });
+  }
+}
+Injectable({ scope: Scope.TRANSIENT })(TransientScopedConsumer);
+QueueHandler()(
+  TransientScopedConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(TransientScopedConsumer.prototype, "handle")!,
+);
+QueueMessage()(TransientScopedConsumer.prototype, "handle", 0);
+
+class SingletonScopedConsumer {
+  static readonly rounds: LifecycleRound[] = [];
+
+  readonly instanceId = ++lifecycleInstanceCounter;
+
+  handle(message: QueueMessage): void {
+    SingletonScopedConsumer.rounds.push({
+      messageId: message?.messageId,
+      instanceId: this.instanceId,
+    });
+  }
+}
+Injectable()(SingletonScopedConsumer);
+QueueHandler()(
+  SingletonScopedConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(SingletonScopedConsumer.prototype, "handle")!,
+);
+QueueMessage()(SingletonScopedConsumer.prototype, "handle", 0);
+
+/**
+ * Two handler methods on ONE request-scoped provider: dispatch must resolve
+ * both methods against the same DI sub-tree per message, so every handler
+ * call of a delivery observes the identical request-scoped `this`.
+ */
+class SharedSubtreeConsumer {
+  static readonly rounds: { method: string; messageId?: string; instanceId: number }[] = [];
+
+  readonly instanceId = ++lifecycleInstanceCounter;
+
+  handleFirst(message: QueueMessage): void {
+    SharedSubtreeConsumer.rounds.push({
+      method: "first",
+      messageId: message?.messageId,
+      instanceId: this.instanceId,
+    });
+  }
+
+  handleSecond(message: QueueMessage): void {
+    SharedSubtreeConsumer.rounds.push({
+      method: "second",
+      messageId: message?.messageId,
+      instanceId: this.instanceId,
+    });
+  }
+}
+Injectable({ scope: Scope.REQUEST })(SharedSubtreeConsumer);
+for (const methodName of ["handleFirst", "handleSecond"] as const) {
+  QueueHandler()(
+    SharedSubtreeConsumer.prototype,
+    methodName,
+    Object.getOwnPropertyDescriptor(SharedSubtreeConsumer.prototype, methodName)!,
+  );
+  QueueMessage()(SharedSubtreeConsumer.prototype, methodName, 0);
+}
+
+class LifecycleModule {}
+Module({
+  providers: [
+    RequestScopedConsumer,
+    TransientScopedConsumer,
+    SingletonScopedConsumer,
+    SharedSubtreeConsumer,
+  ],
+})(LifecycleModule);
+
 describe("queue handler dispatch through the public runtime", () => {
   const runtimes: ClosableYandexCloudFunctionHandler[] = [];
 
   beforeEach(() => {
     RecordingConsumer.rounds.length = 0;
+    RequestScopedConsumer.rounds.length = 0;
+    TransientScopedConsumer.rounds.length = 0;
+    SingletonScopedConsumer.rounds.length = 0;
+    SharedSubtreeConsumer.rounds.length = 0;
+    lifecycleInstanceCounter = 0;
   });
 
   afterEach(async () => {
@@ -231,6 +357,99 @@ describe("queue handler dispatch through the public runtime", () => {
     await expect(runtime(makeQueueDelivery("doomed-id"), RUNTIME_CONTEXT)).rejects.toThrow(
       "fixture handler rejected doomed-id",
     );
+    await runtime.close();
+  });
+
+  it("resolves a fresh REQUEST-scoped handler instance for each message of one batch", async () => {
+    const runtime = makeRuntime(LifecycleModule);
+    const delivery = makeQueueDelivery("rq-first", "rq-second");
+
+    await runtime(delivery, RUNTIME_CONTEXT);
+
+    // One delivery = one request per MESSAGE: every message observes its own
+    // request-scoped instance, never one shared across the batch.
+    const rounds = RequestScopedConsumer.rounds;
+    expect(rounds.map((round) => round.messageId)).toEqual(["rq-first", "rq-second"]);
+    expect(rounds[0]?.instanceId).not.toBe(rounds[1]?.instanceId);
+    // @YandexContext() keeps resolving the invocation context in both rounds.
+    expect(rounds.map((round) => round.requestId)).toEqual([
+      RUNTIME_CONTEXT.awsRequestId,
+      RUNTIME_CONTEXT.awsRequestId,
+    ]);
+    await runtime.close();
+  });
+
+  it("observes one REQUEST-scoped DI sub-tree across all handler calls of a message", async () => {
+    const runtime = makeRuntime(LifecycleModule);
+
+    await runtime(makeQueueDelivery("st-first", "st-second"), RUNTIME_CONTEXT);
+
+    // Both decorated methods belong to the same provider: within one message
+    // they must observe the identical instance (one DI sub-tree per message,
+    // like one platform request), while the next message gets its own.
+    const rounds = SharedSubtreeConsumer.rounds;
+    expect(rounds.map((round) => `${round.messageId}:${round.method}`)).toEqual([
+      "st-first:first",
+      "st-first:second",
+      "st-second:first",
+      "st-second:second",
+    ]);
+    expect(rounds[0]?.instanceId).toBe(rounds[1]?.instanceId);
+    expect(rounds[2]?.instanceId).toBe(rounds[3]?.instanceId);
+    expect(rounds[0]?.instanceId).not.toBe(rounds[2]?.instanceId);
+    await runtime.close();
+  });
+
+  it("gives TRANSIENT handlers a fresh instance per message", async () => {
+    const runtime = makeRuntime(LifecycleModule);
+
+    await runtime(makeQueueDelivery("tr-first", "tr-second"), RUNTIME_CONTEXT);
+
+    const rounds = TransientScopedConsumer.rounds;
+    expect(rounds.map((round) => round.messageId)).toEqual(["tr-first", "tr-second"]);
+    expect(rounds[0]?.instanceId).not.toBe(rounds[1]?.instanceId);
+    await runtime.close();
+  });
+
+  it("keeps DEFAULT-scoped handlers as singletons across messages and warm invocations", async () => {
+    const runtime = makeRuntime(LifecycleModule);
+
+    await runtime(makeQueueDelivery("sg-first"), RUNTIME_CONTEXT);
+    await runtime(makeQueueDelivery("sg-second"), RUNTIME_CONTEXT);
+
+    // Same instance through both messages AND both invocations: singleton
+    // caching is untouched by queue dispatch (AGENTS.md sections 10-11).
+    const instanceIds = new Set(SingletonScopedConsumer.rounds.map((round) => round.instanceId));
+    expect(SingletonScopedConsumer.rounds.map((round) => round.messageId)).toEqual([
+      "sg-first",
+      "sg-second",
+    ]);
+    expect(instanceIds.size).toBe(1);
+    await runtime.close();
+  });
+
+  it("isolates REQUEST-scoped state between concurrent invocations", async () => {
+    const runtime = makeRuntime(LifecycleModule);
+    const deliveries = [
+      { messageId: "cx-first", requestId: "cx-request-a" },
+      { messageId: "cx-second", requestId: "cx-request-b" },
+    ];
+
+    await Promise.all(
+      deliveries.map(({ messageId, requestId }) =>
+        runtime(makeQueueDelivery(messageId), { ...RUNTIME_CONTEXT, awsRequestId: requestId }),
+      ),
+    );
+
+    // Concurrent invocations each get their own request-scoped sub-tree:
+    // distinct instances, each paired with exactly its own execution context.
+    const rounds = RequestScopedConsumer.rounds;
+    expect(rounds).toHaveLength(deliveries.length);
+    expect(new Set(rounds.map((round) => round.instanceId)).size).toBe(deliveries.length);
+    for (const round of rounds) {
+      const expected = deliveries.find((entry) => entry.messageId === round.messageId);
+      expect(round.requestId).toBe(expected?.requestId);
+    }
     await runtime.close();
   });
 

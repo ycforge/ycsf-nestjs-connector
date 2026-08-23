@@ -8,6 +8,7 @@ import {
   runInInvocationScope,
 } from "../context/invocation-scope";
 import { YandexContext } from "../context/yandex-context.decorator";
+import type { InvocationResolutionContext } from "../core/transport";
 import { discoverQueueHandlers, dispatchQueueHandlers } from "./dispatch";
 import { normalizeQueueBatch } from "./normalize-batch";
 import { QueueHandler } from "./queue-handler.decorator";
@@ -128,14 +129,48 @@ function providerWrapper(
 
 /** Per-invocation container seam fake resolving pre-registered instances. */
 function fakeInvocationContainer(instances: ReadonlyMap<unknown, object>): {
-  resolve<T>(token: unknown): Promise<T>;
+  resolve<T>(token: unknown, resolutionContext?: InvocationResolutionContext): Promise<T>;
 } {
   return {
-    async resolve<T>(token: unknown): Promise<T> {
+    async resolve<T>(token: unknown, resolutionContext?: InvocationResolutionContext): Promise<T> {
+      void resolutionContext;
       const instance = instances.get(token);
       if (!instance) {
         throw new Error(`no instance registered for token ${String(token)}`);
       }
+      // Spec-local narrowing: fixtures register exactly the instances the
+      // dispatched handlers expect.
+      return instance as T;
+    },
+  };
+}
+
+interface RecordedResolution {
+  messageIdDuringResolve?: string;
+  contextId?: { readonly id: number };
+}
+
+/**
+ * Container fake recording every resolution together with the invocation
+ * scope state observed WHILE resolving — proving resolution happens inside
+ * the per-message scope extension and under one shared DI sub-tree id.
+ */
+function recordingInvocationContainer(instances: ReadonlyMap<unknown, object>): {
+  resolve<T>(token: unknown, resolutionContext?: InvocationResolutionContext): Promise<T>;
+  readonly resolutions: RecordedResolution[];
+} {
+  const resolutions: RecordedResolution[] = [];
+  return {
+    resolutions,
+    async resolve<T>(token: unknown, resolutionContext?: InvocationResolutionContext): Promise<T> {
+      const instance = instances.get(token);
+      if (!instance) {
+        throw new Error(`no instance registered for token ${String(token)}`);
+      }
+      resolutions.push({
+        messageIdDuringResolve: getInvocationScopeState()?.queueMessage?.messageId,
+        contextId: resolutionContext?.contextId,
+      });
       // Spec-local narrowing: fixtures register exactly the instances the
       // dispatched handlers expect.
       return instance as T;
@@ -496,6 +531,109 @@ describe("queue handler dispatch", () => {
       expect(() => resolveInvocationQueueMessage()).toThrow(/no Message Queue message/);
       expect(getInvocationScopeState()?.queueMessage).toBeUndefined();
     });
+  });
+
+  it("resolves every handler once per message under one shared DI sub-tree id", async () => {
+    const delivery = makeQueueDelivery("m-one", "m-two");
+    const batch = normalizeQueueBatch(delivery);
+
+    const First = class {
+      handle(): void {}
+    };
+    decorateQueueHandler(First.prototype, "handle");
+    const Second = class {
+      handle(): void {}
+    };
+    decorateQueueHandler(Second.prototype, "handle");
+
+    const container = recordingInvocationContainer(
+      new Map<unknown, object>([
+        [First, new First()],
+        [Second, new Second()],
+      ]),
+    );
+
+    await runInInvocationScope({ executionContext: makeDispatchContext(delivery) }, () =>
+      dispatchQueueHandlers(
+        container,
+        [
+          { token: First, methodName: "handle" },
+          { token: Second, methodName: "handle" },
+        ],
+        batch,
+      ),
+    );
+
+    // One resolution per handler per message — never one per invocation.
+    expect(container.resolutions).toHaveLength(4);
+    // Resolution ran INSIDE each message's scope extension: the resolving
+    // call observes exactly that message (AGENTS.md section 11).
+    expect(container.resolutions.map((entry) => entry.messageIdDuringResolve)).toEqual([
+      "m-one",
+      "m-one",
+      "m-two",
+      "m-two",
+    ]);
+    // Both handlers of one message resolve under the SAME DI sub-tree id...
+    const firstRoundContextId = container.resolutions[0]?.contextId;
+    expect(firstRoundContextId).toBeDefined();
+    expect(container.resolutions[1]?.contextId).toBe(firstRoundContextId);
+    // ...and every new message gets its own sub-tree.
+    const secondRoundContextId = container.resolutions[2]?.contextId;
+    expect(secondRoundContextId).toBeDefined();
+    expect(secondRoundContextId).not.toBe(firstRoundContextId);
+    expect(container.resolutions[3]?.contextId).toBe(secondRoundContextId);
+  });
+
+  it("stops processing when a resolution fails mid-batch and propagates the original failure", async () => {
+    const delivery = makeQueueDelivery("m-ok", "m-doomed", "m-never");
+    const batch = normalizeQueueBatch(delivery);
+    const doomedError = new Error("provider factory exploded");
+
+    const handledBy: string[] = [];
+    const Reliable = class {
+      handle(): void {
+        handledBy.push(`reliable:${getInvocationScopeState()?.queueMessage?.messageId}`);
+      }
+    };
+    decorateQueueHandler(Reliable.prototype, "handle");
+    const ExplodingResolution = class {
+      handle(): void {
+        handledBy.push(`exploding:${getInvocationScopeState()?.queueMessage?.messageId}`);
+      }
+    };
+    decorateQueueHandler(ExplodingResolution.prototype, "handle");
+
+    let resolutionCount = 0;
+    const failure = await capturedRejection(
+      runInInvocationScope({ executionContext: makeDispatchContext(delivery) }, () =>
+        dispatchQueueHandlers(
+          {
+            async resolve<T>(token: unknown): Promise<T> {
+              if (token === Reliable) {
+                return Object.create(Reliable.prototype) as T;
+              }
+              resolutionCount += 1;
+              if (resolutionCount === 2) {
+                throw doomedError;
+              }
+              return Object.create(ExplodingResolution.prototype) as T;
+            },
+          },
+          [
+            { token: Reliable, methodName: "handle" },
+            { token: ExplodingResolution, methodName: "handle" },
+          ],
+          batch,
+        ),
+      ),
+    );
+
+    // The original factory error surfaces unwrapped; m-ok completed fully,
+    // m-doomed aborted at its failing resolution before any handler ran, and
+    // m-never was never attempted.
+    expect(failure).toBe(doomedError);
+    expect(handledBy).toEqual(["reliable:m-ok", "exploding:m-ok"]);
   });
 
   it("stops the delivery at the first failing handler and propagates the original failure", async () => {

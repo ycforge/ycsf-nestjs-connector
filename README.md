@@ -93,7 +93,11 @@ published to the invocation scope. Queue handlers are plain NestJS providers
 or controllers whose methods carry `@QueueHandler()` (#8): every discovered
 handler receives every delivered message, sequentially in delivery order,
 with `@QueueMessage()` injecting the current message and `@YandexContext()`
-the invocation context. Failures — malformed deliveries, missing queue
+the invocation context. Handler instances resolve once per message under a
+DI sub-tree created for that message: `DEFAULT` providers stay singletons,
+`REQUEST` providers are fresh per message yet consistent across every
+handler call of that message, and `TRANSIENT` ones refresh per message.
+Failures — malformed deliveries, missing queue
 handlers (`NO_QUEUE_HANDLER`) as well as handler errors — propagate out of
 the invocation so Message Queue retry/dead-letter configuration stays
 effective; deliveries no transport claims reject with `ConnectorError` code
