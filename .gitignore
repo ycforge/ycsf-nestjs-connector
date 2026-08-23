@@ -19,3 +19,6 @@ coverage/
 # Local packaging output
 *.tgz
 .package-check/
+
+# Local developer tooling build output (npm run replay)
+.tools/

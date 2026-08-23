@@ -246,14 +246,15 @@ extension points for future transports.
 
 Source layout:
 
-| Directory         | Visibility | Responsibility                                    |
-| ----------------- | ---------- | ------------------------------------------------- |
-| `src/index.ts`    | Public     | The only entry point; deliberate export surface   |
-| `src/core/`       | Mixed      | Transport SPI contracts; runtime internals (#3)   |
-| `src/http/`       | Mixed      | Public HTTP contracts; adapter behavior (#5, #6)  |
-| `src/mq/`         | Mixed      | Public queue contracts; adapter behavior (#7, #8) |
-| `src/context/`    | Mixed      | Context contract + decorator (#4); internals      |
-| `src/decorators/` | Public     | Decorator signatures; queue implementations (#8)  |
+| Directory         | Visibility | Responsibility                                                                |
+| ----------------- | ---------- | ----------------------------------------------------------------------------- |
+| `src/index.ts`    | Public     | The only entry point; deliberate export surface                               |
+| `src/core/`       | Mixed      | Transport SPI contracts; runtime internals (#3)                               |
+| `src/http/`       | Mixed      | Public HTTP contracts; adapter behavior (#5, #6)                              |
+| `src/mq/`         | Mixed      | Public queue contracts; adapter behavior (#7, #8)                             |
+| `src/context/`    | Mixed      | Context contract + decorator (#4); internals                                  |
+| `src/decorators/` | Public     | Decorator signatures; queue implementations (#8)                              |
+| `src/testing/`    | Internal   | Test-only fixture loader + local replay tool (#11, #12); excluded from `dist` |
 
 Per-module visibility tiers and the explicit list of public exports are in
 [ARCHITECTURE.md §2 and §7](./docs/ARCHITECTURE.md#7-public-api-surface).
@@ -275,6 +276,9 @@ npm run build      # emit dist/ with declarations
 npm run package:check
 # validate the packed tarball: publishable file set plus standalone
 # consumption through the public entry point only (runtime and type level)
+npm run replay -- --http-all --mq-all
+# locally replay the sanitized conformance fixtures through
+# createYandexHandler(); see docs/REPLAY.md (issue #12)
 ```
 
 Pull requests must pass lint, format check, typecheck, tests and build; CI runs

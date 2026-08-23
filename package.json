@@ -49,7 +49,9 @@
     "format:check": "prettier --check .",
     "test": "jest",
     "test:watch": "jest --watch",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "build:tools": "tsc -p tsconfig.tools.json",
+    "replay": "npm run build:tools --silent && node .tools/testing/replay-cli.js"
   },
   "peerDependencies": {
     "@nestjs/common": "^11.0.0",
