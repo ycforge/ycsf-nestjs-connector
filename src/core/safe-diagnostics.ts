@@ -23,11 +23,15 @@ import { ConnectorError } from "./connector-error";
  * - `token` — replaced with {@link REDACTED_TOKEN} **on the root object**
  *   of the serialized value (the execution-context shape) and on any nested
  *   node matching the runtime-context fingerprint (own `awsRequestId` +
- *   `functionName` + `token`), so realistic diagnostic wrappers such as
- *   `{ message: "...", ctx: context }` never leak the IAM secret. Other
- *   nested `token` properties are preserved verbatim: application payloads
- *   may legitimately carry domain fields named `token`, and blindly
- *   redacting them would destroy business data (documented scope).
+ *   `functionName` + `functionVersion` + `memoryLimitInMB`, plus a
+ *   string-typed own `token` — all four identity fields are mandatory on
+ *   every context the builder accepts, DATA-ANALYSE.md section D), so
+ *   realistic diagnostic wrappers such as `{ message: "...", ctx: context }`
+ *   never leak the IAM secret. Other nested `token` properties are preserved
+ *   verbatim: application payloads may legitimately carry domain fields named
+ *   `token`, and blindly redacting them would destroy business data. Explicit
+ *   boundary: a lookalike telemetry object matching only PART of that field
+ *   set keeps its token — partial matches are guesswork, not recognition.
  * - Inside any property named exactly `headers`, entry names are matched
  *   case-insensitively against the observed sensitive set:
  *   `Authorization` → {@link REDACTED_AUTHORIZATION}, `Cookie` →
@@ -41,22 +45,35 @@ import { ConnectorError } from "./connector-error";
  * - Keys `raw`/`rawEvent` are omitted entirely: raw escape hatches never
  *   enter safe diagnostics; read them explicitly when you actually need them.
  * - Recognized payload carriers drop their bodies instead of dumping them:
- *   a normalized queue message (fingerprint: all eight camelCase message
- *   fields) serializes to identity/metadata plus attribute NAMES — body,
- *   lazy `payload` and attribute string values are omitted because queue
- *   payloads routinely contain application secrets; a raw API Gateway v2
- *   event (`version: "2.0"` + canonical fields) and a raw MQ wire message
- *   (`message_id` + `md5_of_body`) omit their `body` key. Business objects
- *   that merely own a `body` or `token` field are NOT matched and stay
- *   intact. Two credential-bearing duplication channels are reduced wherever
- *   their structural names appear: raw wire message attributes render as
+ *   a normalized queue message serializes to identity/metadata plus attribute
+ *   NAMES — body, lazy `payload` and attribute string values are omitted
+ *   because queue payloads routinely contain application secrets; a raw API
+ *   Gateway v2 event and a raw MQ wire message omit their `body` key.
+ *
+ *   Recognition is deliberately strict (false-positive audit): each wire
+ *   fingerprint demands the COMPLETE top-level field set its transport's
+ *   structural validator requires — fields delivered in 46/46 (HTTP) and
+ *   51/51 (MQ) captured invocations — so ordinary business objects owning a
+ *   plausible subset (`body`, `token`, `messageId`, `version: "2.0"`,
+ *   `rawPath`, …) are NOT matched and stay intact. The normalized message
+ *   additionally requires `payload` to be a lazy own accessor, which every
+ *   genuine message has and application lookalikes do not.
+ *
+ *   Documented trade-off: an INCOMPLETE carrier (a hand-trimmed event or
+ *   partial wire message missing one required field) falls back to generic
+ *   traversal and its body WOULD render. When uncertain, serialize complete
+ *   observed events or normalized models — or pass the payload-bearing part
+ *   through a deliberate redaction of your own.
+ *
+ *   Two credential-bearing duplication channels are reduced wherever their
+ *   structural names appear: raw wire message attributes render as
  *   name → declared `dataType` only (scoped to the recognized raw MQ wire
- *   message, since the fallback for unrecognized shapes is destructive), and
- *   gateway-declared parameter maps (`parameters`, `queryStringParameters`,
- *   `multiValueParameters` — observed on raw events and normalized requests
- *   alike, DATA-ANALYSE.md anomaly 10) get placeholders for entries named
- *   like credentials (`authorization` exactly, or any name containing
- *   "cookie") while all other entries pass through verbatim.
+ *   message), and gateway-declared parameter maps (`parameters`,
+ *   `queryStringParameters`, `multiValueParameters` — observed on raw events
+ *   and normalized requests alike, DATA-ANALYSE.md anomaly 10) get
+ *   placeholders for entries named like credentials (`authorization` exactly,
+ *   or any name containing "cookie") while all other entries pass through
+ *   verbatim.
  * - `Error` instances (including `ConnectorError`) collapse to
  *   `{ name }` plus `{ code, transportId }` for boundary errors. `message`,
  *   `stack` and `cause` are never emitted: arbitrary exception text may
@@ -180,16 +197,11 @@ function redactValue(value: unknown, seen: WeakSet<object>, frame: WalkFrame): u
   // A node shaped like the observed runtime context carries the IAM token
   // regardless of how deeply it is nested inside a diagnostic envelope, so
   // realistic wrappers such as `{ message: "...", ctx: context }` stay safe.
-  // The fingerprint mirrors the queue-message approach: specific co-occurring
-  // identity fields instead of a bare property name.
-  if (
-    !frame.isRoot &&
-    Object.hasOwn(record, "awsRequestId") &&
-    Object.hasOwn(record, "functionName") &&
-    Object.hasOwn(record, "token")
-  ) {
-    return redactRecord(record, seen, { isRoot: true }, EMPTY_OMIT_KEYS);
-  }
+  // The fingerprint demands fields that are MANDATORY on every context the
+  // builder accepts and were observed identically across all captured
+  // invocations (DATA-ANALYSE.md section D); application telemetry that
+  // merely pairs a request id, a function name and a token stays untouched.
+  const contextShaped = !frame.isRoot && isRuntimeContextShape(record);
 
   if (isQueueMessageShape(record)) {
     return redactQueueMessage(record, seen);
@@ -202,11 +214,12 @@ function redactValue(value: unknown, seen: WeakSet<object>, frame: WalkFrame): u
   // Proxy inputs are out of contract (traps may run; see module docs).
   const scope = rawWireScope(record);
   const omitKeys = scope === undefined ? EMPTY_OMIT_KEYS : RAW_PAYLOAD_OMIT_KEYS;
-  return redactRecord(record, seen, frame, omitKeys, scope);
+  return redactRecord(record, seen, contextShaped ? ROOT_FRAME : frame, omitKeys, scope);
 }
 
 const EMPTY_OMIT_KEYS: ReadonlySet<string> = new Set<string>();
 const RAW_PAYLOAD_OMIT_KEYS: ReadonlySet<string> = new Set(["body"]);
+const ROOT_FRAME: WalkFrame = { isRoot: true };
 
 function redactArray(source: readonly unknown[], seen: WeakSet<object>): unknown[] {
   return visitNode(source, seen, () =>
@@ -363,20 +376,76 @@ function messageAttributeNames(messageAttributes: unknown): string[] {
  */
 type RawWireScope = "http-api-gateway-v2" | "message-queue-message";
 
+/**
+ * Own-presence requirements for recognizing a raw API Gateway v2 event:
+ * exactly the top-level field set the HTTP transport's structural validator
+ * demands (src/http/validate-raw-event.ts), all of which were delivered in
+ * 46/46 captured invocations (DATA-ANALYSE.md section B). Requiring the FULL
+ * observed set keeps genuine events recognized while making accidental
+ * collisions with application objects implausible — an object missing any
+ * single field is treated as ordinary data whose properties render verbatim.
+ */
+const RAW_HTTP_EVENT_REQUIRED_KEYS = [
+  "rawPath",
+  "rawQueryString",
+  "headers",
+  "queryStringParameters",
+  "requestContext",
+  "body",
+  "isBase64Encoded",
+  "pathParameters",
+  "parameters",
+  "multiValueParameters",
+  "operationId",
+] as const;
+
+/**
+ * Own-presence requirements for recognizing a raw Message Queue wire message:
+ * the complete snake_case field set the MQ validator requires
+ * (src/mq/validate-raw-event.ts), each present in 51/51 captures. The earlier
+ * two-field version (`message_id` + `md5_of_body`) was too loose: a domain
+ * record carrying just those names would have lost its `body` and had its
+ * `message_attributes` values reduced to type declarations.
+ */
+const RAW_QUEUE_MESSAGE_REQUIRED_KEYS = [
+  "message_id",
+  "md5_of_body",
+  "body",
+  "attributes",
+  "message_attributes",
+  "md5_of_message_attributes",
+] as const;
+
 function rawWireScope(value: Record<string, unknown>): RawWireScope | undefined {
-  const isRawHttpEvent =
+  if (
     value["version"] === "2.0" &&
-    ["rawPath", "rawQueryString", "headers", "requestContext"].every((key) =>
-      Object.hasOwn(value, key),
-    );
-  if (isRawHttpEvent) {
+    RAW_HTTP_EVENT_REQUIRED_KEYS.every((key) => Object.hasOwn(value, key))
+  ) {
     return "http-api-gateway-v2";
   }
-  // Observed Message Queue trigger message: snake_case identity beside the
-  // checksum of the very body being suppressed.
-  const isRawQueueMessage =
-    Object.hasOwn(value, "message_id") && Object.hasOwn(value, "md5_of_body");
-  return isRawQueueMessage ? "message-queue-message" : undefined;
+  if (RAW_QUEUE_MESSAGE_REQUIRED_KEYS.every((key) => Object.hasOwn(value, key))) {
+    return "message-queue-message";
+  }
+  return undefined;
+}
+
+/**
+ * Minimum co-occurrence marking a NESTED node as a runtime execution context.
+ * `awsRequestId`, `functionName`, `functionVersion` and `memoryLimitInMB` are
+ * mandatory on every context `buildYandexExecutionContext` accepts and were
+ * observed identically in 97/97 captured invocations; requiring them beside a
+ * string-typed `token` keeps realistic diagnostic wrappers safe while leaving
+ * application objects that happen to own a token (or even a request-id/
+ * function-name pair) verbatim. Deliberate trade-off: a lookalike telemetry
+ * object matching only PART of this set keeps its token — when a structure is
+ * not recognizably a runtime context, redacting it would be guesswork.
+ */
+function isRuntimeContextShape(record: Record<string, unknown>): boolean {
+  return (
+    ["awsRequestId", "functionName", "functionVersion", "memoryLimitInMB"].every((key) =>
+      Object.hasOwn(record, key),
+    ) && typeof record["token"] === "string"
+  );
 }
 
 /**
@@ -476,8 +545,20 @@ function redactGatewayParameterMap(parameterValue: unknown, seen: WeakSet<object
   });
 }
 
+/**
+ * Recognizes a normalized queue message. The eight camelCase fields alone are
+ * already a narrow conjunction, but the deciding discriminator is `payload`:
+ * every genuine message defines it as a lazy own accessor
+ * (src/mq/normalize-batch.ts), so an application lookalike that happens to
+ * carry all eight names as ordinary data — including one holding a plain
+ * `payload` value — is NOT matched and keeps its body/payload intact.
+ */
 function isQueueMessageShape(value: object): value is Record<string, unknown> {
-  return QUEUE_MESSAGE_FINGERPRINT.every((key) => Object.hasOwn(value, key));
+  if (!QUEUE_MESSAGE_FINGERPRINT.every((key) => Object.hasOwn(value, key))) {
+    return false;
+  }
+  const payload = Object.getOwnPropertyDescriptor(value, "payload");
+  return payload !== undefined && payload.get !== undefined;
 }
 
 /**

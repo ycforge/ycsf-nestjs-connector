@@ -580,10 +580,13 @@ the full policy is documented in the module header. Summary:
 - **Credentials/personal data**:
   - `token` is replaced with `REDACTED_TOKEN` on the serialized root value and
     on any nested node matching the runtime-context fingerprint (own
-    `awsRequestId` + `functionName` + `token`), so wrappers like
+    `awsRequestId` + `functionName` + `functionVersion` + `memoryLimitInMB`,
+    plus a string-typed `token` — all four identity fields are mandatory on
+    every context the builder accepts, DATA-ANALYSE.md §D), so wrappers like
     `{ message: "...", ctx: context }` are safe; other nested `token`
     properties pass verbatim (documented scope — business payloads may own
-    domain fields of that name).
+    domain fields of that name). A lookalike telemetry object matching only
+    part of the set keeps its token: partial matches are not recognition.
   - Inside any property named exactly `headers`: case-insensitive entry match
     for `Authorization` → `REDACTED_AUTHORIZATION`, `Cookie` →
     `REDACTED_COOKIE`, `X-Forwarded-For` / `X-Envoy-External-Address` /
@@ -604,8 +607,15 @@ the full policy is documented in the module header. Summary:
   metadata plus attribute NAMES only (no body, no lazy `payload`, no attribute
   values); a recognized raw API Gateway v2 event drops its `body`; a
   recognized raw MQ wire message drops its `body` and renders
-  `message_attributes` as name → declared `dataType`. Business objects that
-  merely own `body`/`token` fields are untouched.
+  `message_attributes` as name → declared `dataType`. Recognition is strict
+  (false-positive audit): each wire fingerprint requires the COMPLETE
+  top-level field set its transport validator demands (46/46 HTTP, 51/51 MQ
+  observed), and the normalized message additionally requires `payload` to be
+  a lazy own accessor — so business objects owning plausible subsets (`body`,
+  `token`, `messageId`, `version: "2.0"`, `rawPath`, …) stay intact.
+  Documented trade-off: an incomplete carrier (hand-trimmed event, partial
+  wire message) falls back to generic traversal and its body WOULD render;
+  serialize complete observed events or normalized models when uncertain.
 - **Errors** collapse to `{ name }` (`+ code`, `transportId` for
   `ConnectorError`) — never message, stack or cause chains.
 - **Traversal safety**: getters are never evaluated (rendered

@@ -217,6 +217,9 @@ describe("safeDiagnostics: raw boundary preservation", () => {
       },
       body: "sentinel-form-password",
       isBase64Encoded: true,
+      pathParameters: {},
+      parameters: {},
+      multiValueParameters: {},
       operationId: "a".repeat(64),
     };
     const rawContext = { ...OBSERVED_CONTEXT, _data: rawEvent };
@@ -249,7 +252,123 @@ describe("safeDiagnostics: raw boundary preservation", () => {
     expect(serialized["md5_of_body"]).toBe("5d41402abc4b2a76b9719d911017c592");
     expect(serialized["attributes"]).toEqual({ SentTimestamp: "1787348674266" });
   });
+});
 
+describe("safeDiagnostics: fingerprint collision boundaries", () => {
+  /**
+   * Regression suite for the false-positive audit: every structural
+   * fingerprint must require its COMPLETE observed field set, so ordinary
+   * application objects owning plausible subsets keep every property —
+   * including bodies, tokens and payloads — exactly as written.
+   */
+
+  it("keeps a seven-of-eight domain lookalike intact (no queue-message match)", () => {
+    // All plausible camelCase names EXCEPT queueId: must not be mistaken for
+    // a normalized queue message, or its body would be destroyed.
+    const domainRecord = {
+      messageId: "domain-generated-id",
+      md5OfBody: "not-a-real-checksum",
+      body: "sentinel-domain-body",
+      attributes: { priority: "high" },
+      messageAttributes: { trace: { dataType: "String", stringValue: "t" } },
+      md5OfMessageAttributes: "domain-side-hash",
+      eventMetadata: { origin: "outbox" },
+    };
+
+    const serializedJson = JSON.stringify(safeDiagnostics(domainRecord));
+
+    expect(safeDiagnostics(domainRecord)).toEqual(domainRecord);
+    expect(serializedJson).toContain("sentinel-domain-body");
+  });
+
+  it("keeps an eight-of-eight lookalike with a data payload property intact", () => {
+    // The deciding discriminator for genuine messages is the lazy `payload`
+    // accessor; a plain data property marks an application object.
+    const outboxRecord = {
+      messageId: "m-1",
+      md5OfBody: "h",
+      body: "sentinel-outbox-body",
+      attributes: {},
+      messageAttributes: {},
+      md5OfMessageAttributes: "",
+      queueId: "q-1",
+      eventMetadata: {},
+      payload: { already: "materialized" },
+    };
+
+    expect(safeDiagnostics(outboxRecord)).toEqual(outboxRecord);
+  });
+
+  it("keeps a partial HTTP-event lookalike intact", () => {
+    // version/rawPath/headers/requestContext/body alone do NOT make an API
+    // Gateway v2 event: the fingerprint requires the complete validator set.
+    const legacyConfig = {
+      version: "2.0",
+      rawPath: "/legacy/import",
+      rawQueryString: "",
+      headers: { Accept: "application/json" },
+      requestContext: { requestId: "cfg-1" },
+      body: "sentinel-config-body",
+      operationId: "cfg-operation",
+    };
+
+    expect(safeDiagnostics(legacyConfig)).toEqual(legacyConfig);
+  });
+
+  it("keeps a partial MQ wire lookalike intact", () => {
+    // Two snake_case names alone no longer suppress the body: recognition
+    // demands the complete observed wire shape.
+    const delivery = {
+      message_id: "domain-id-1",
+      md5_of_body: "domain-hash",
+      body: "sentinel-delivery-body",
+    };
+
+    expect(safeDiagnostics(delivery)).toEqual(delivery);
+  });
+
+  it("keeps nested application payloads mixing runtime-like names intact", () => {
+    const applicationPayload = {
+      shipment: {
+        messageId: "ship-1",
+        body: { weightKg: 12 },
+        token: "shipment-domain-token",
+        queueId: "warehouse-eu",
+      },
+      telemetry: { awsRequestId: "telemetry-1", functionName: "worker" },
+      note: "version 2.0 migration with rawPath /v2",
+    };
+
+    expect(safeDiagnostics(applicationPayload)).toEqual(applicationPayload);
+  });
+
+  it("does not redact a context lookalike that misses mandatory identity fields", () => {
+    // awsRequestId + functionName + token alone are no longer enough: both
+    // remaining identity fields are mandatory on real contexts.
+    const lookalike = {
+      wrapper: {
+        awsRequestId: "req-1",
+        functionName: "business-worker",
+        token: "sentinel-telemetry-token",
+      },
+    };
+
+    expect(safeDiagnostics(lookalike)).toEqual(lookalike);
+  });
+
+  it("still redacts genuinely context-shaped nodes under diagnostic wrappers", () => {
+    const wrapper = {
+      message: "invocation handled",
+      ctx: { ...OBSERVED_CONTEXT },
+    };
+
+    const serialized = safeDiagnostics(wrapper) as { ctx: Record<string, unknown> };
+    expect(serialized.ctx["token"]).toBe(REDACTED_TOKEN);
+    expect(serialized.ctx["awsRequestId"]).toBe("f18fed85-7096-4f0e-a6db-e2c5e37e925f");
+  });
+});
+
+describe("safeDiagnostics: scoped suppression of duplication channels", () => {
   it("renders raw wire message attributes as names plus declared data types only", () => {
     // User message attribute values are free-form application strings and
     // may carry secrets; the declared type is structural, observed metadata.
