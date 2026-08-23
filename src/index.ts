@@ -41,18 +41,17 @@ export type {
   RawQueueMessageAttributeValue,
   RawQueueMessageEvent,
 } from "./mq/raw-event";
-export type {
-  QueueBatch,
-  QueueEventMetadata,
-  QueueMessage,
-  QueueMessageAttribute,
-} from "./mq/message";
+export type { QueueBatch, QueueEventMetadata, QueueMessageAttribute } from "./mq/message";
 
 // Normalized execution context.
 export type { YandexExecutionContext } from "./context/yandex-execution-context";
 
-// Decorators (queue decorators arrive with issue #8).
+// Decorators. `QueueMessage` ships as one merged export (callable decorator
+// plus the normalized message type it injects); see the module header of
+// src/mq/queue-message.decorator.ts and docs/ARCHITECTURE.md section 7.
 export { YandexContext } from "./context/yandex-context.decorator";
+export { QueueHandler } from "./mq/queue-handler.decorator";
+export { QueueMessage } from "./mq/queue-message.decorator";
 export type {
   ContextParameterDecorator,
   QueueHandlerMethodDecorator,

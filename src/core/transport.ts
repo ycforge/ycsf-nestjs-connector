@@ -36,6 +36,23 @@ export type YandexCloudFunctionHandler = (
 export type InjectableToken<T = unknown> = (abstract new (...args: never[]) => T) | string | symbol;
 
 /**
+ * Dependency-injection sub-tree a resolution belongs to.
+ *
+ * `contextId` is the structural subset of @nestjs/core's `ContextId` that
+ * `NestApplicationContext.resolve` accepts (verified against @nestjs/core 11,
+ * the pinned peer dependency): resolutions sharing one context id observe the
+ * same REQUEST-scoped instances, because the framework caches per-context
+ * instances in structures keyed by that exact object. Create ids through
+ * `ContextIdFactory.create()`; the framework stores them weakly, so dropping
+ * the reference after use lets the collector reclaim the whole sub-tree.
+ */
+export interface InvocationResolutionContext {
+  readonly contextId: {
+    readonly id: number;
+  };
+}
+
+/**
  * Read-only view over the warm NestJS application instance.
  *
  * Since issue #6 the runtime bootstraps one HTTP-bound application
@@ -45,7 +62,21 @@ export type InjectableToken<T = unknown> = (abstract new (...args: never[]) => T
  * registered routes via {@linkcode INestApplication.getHttpAdapter}.
  */
 export interface InvocationContainer {
-  resolve<T>(token: InjectableToken<T>): Promise<T>;
+  /**
+   * Resolves a provider through the warm application.
+   *
+   * Without {@link InvocationResolutionContext} each call creates its own
+   * throwaway DI sub-tree. Passing one groups several resolutions into a
+   * single sub-tree: Message Queue dispatch uses one per delivered message so
+   * REQUEST-scoped providers behave per delivery while staying consistent
+   * across every handler of that message. DEFAULT-scoped providers return
+   * their cached singleton either way (verified against NestJS 11); failures
+   * propagate verbatim to the caller.
+   */
+  resolve<T>(
+    token: InjectableToken<T>,
+    resolutionContext?: InvocationResolutionContext,
+  ): Promise<T>;
   /** The warm application backing this invocation's container. */
   getApplication(): INestApplication;
 }

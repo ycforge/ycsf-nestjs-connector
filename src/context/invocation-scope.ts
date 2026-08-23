@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { NormalizedHttpRequest } from "../http/normalized-request";
-import type { QueueBatch } from "../mq/message";
+import type { QueueBatch, QueueMessage } from "../mq/message";
 import type { YandexExecutionContext } from "./yandex-execution-context";
 
 /**
@@ -30,6 +30,16 @@ export interface InvocationScopeState {
    * singletons (AGENTS.md section 11).
    */
   readonly queueBatch?: QueueBatch;
+
+  /**
+   * The one message a queue handler is currently processing, published as an
+   * immutable scope extension around each handler call during dispatch
+   * (issue #8). Absent outside queue handler execution — including between
+   * messages of the same delivery — so concurrent and sequential handlers
+   * stay isolated while sharing their invocation's batch and execution
+   * context (AGENTS.md section 11).
+   */
+  readonly queueMessage?: QueueMessage;
 }
 
 /**
@@ -135,4 +145,24 @@ export function resolveInvocationQueueBatch(): QueueBatch {
     );
   }
   return state.queueBatch;
+}
+
+/**
+ * Resolves the message a queue handler is currently processing.
+ *
+ * Internal seam consumed by queue dispatch (issue #8) and specs; deliberately
+ * not part of the public export surface, mirroring
+ * {@link resolveInvocationQueueBatch}. Published only around one handler call
+ * at a time, so resolution between messages of the same delivery — or during
+ * a non-queue invocation — fails loudly instead of returning a stale or
+ * undefined message typed as present.
+ */
+export function resolveInvocationQueueMessage(): QueueMessage {
+  const state = invocationStorage.getStore();
+  if (!state?.queueMessage) {
+    throw new Error(
+      "no Message Queue message is associated with the current execution; messages are only published while a queue handler runs",
+    );
+  }
+  return state.queueMessage;
 }

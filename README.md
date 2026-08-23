@@ -13,17 +13,17 @@ NestJS into a Yandex-specific application framework. Business logic stays
 independent of Yandex Cloud whenever practical.
 
 > **Status: runtime bootstrap, execution context, the full HTTP transport and
-> the Message Queue event adapter have landed.** The package architecture and
+> the Message Queue transport have landed.** The package architecture and
 > public contracts are established (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
 > and [`src/index.ts`](./src/index.ts)); the central function factory shipped
 > with issue #3, the normalized execution context with `@YandexContext()`
 > injection with issue #4, the Yandex API Gateway v2 HTTP request adapter
 > (detection, validation, normalization) with issue #5, HTTP response/error
-> mapping plus controller dispatch with issue #6, and the Message Queue event
-> adapter (detection, validation, batch normalization) with issue #7. Queue
-> handler dispatch and decorators (#8) are next. Observed Yandex Cloud runtime
-> constraints that all connector code must respect are catalogued in
-> [AGENTS.md](./AGENTS.md).
+> mapping plus controller dispatch with issue #6, the Message Queue event
+> adapter (detection, validation, batch normalization) with issue #7, and
+> queue handler dispatch with `@QueueHandler()`/`@QueueMessage()` injection
+> with issue #8. Observed Yandex Cloud runtime constraints that all connector
+> code must respect are catalogued in [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -89,15 +89,57 @@ Message Queue deliveries are detected by the built-in registry as well
 structurally validated, normalized into a batch of typed message envelopes
 (event metadata, queue id, message identity, verbatim system and user
 attributes, checksums, opaque raw body, untouched raw references) and
-published to the invocation scope. Queue handler dispatch over that batch,
-including `@QueueHandler()`/`@QueueMessage()`, lands with issue #8; until
-then a queue invocation resolves with its normalized batch. Failures —
-malformed deliveries as well as later handler errors — propagate out of the
-invocation so Message Queue retry/dead-letter configuration stays effective;
-deliveries no transport claims reject with `ConnectorError` code
+published to the invocation scope. Queue handlers are plain NestJS providers
+or controllers whose methods carry `@QueueHandler()` (#8): every discovered
+handler receives every delivered message, sequentially in delivery order,
+with `@QueueMessage()` injecting the current message and `@YandexContext()`
+the invocation context. Handler instances resolve once per message under a
+DI sub-tree created for that message: `DEFAULT` providers stay singletons,
+`REQUEST` providers are fresh per message yet consistent across every
+handler call of that message, and `TRANSIENT` ones refresh per message.
+Failures — malformed deliveries, missing queue
+handlers (`NO_QUEUE_HANDLER`) as well as handler errors — propagate out of
+the invocation so Message Queue retry/dead-letter configuration stays
+effective; deliveries no transport claims reject with `ConnectorError` code
 `UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
 `handler.close()` to release the cached application; the next invocation
 cold-starts again.
+
+### Message Queue handlers
+
+```ts
+import { Injectable } from "@nestjs/common";
+import {
+  QueueHandler,
+  QueueMessage,
+  YandexContext,
+  type QueueMessage as YandexQueueMessage,
+  type YandexExecutionContext,
+} from "@ycforge/ycsf-nestjs-connector";
+
+@Injectable()
+export class OrdersConsumer {
+  // Every @QueueHandler() method receives EVERY delivered message; a batch
+  // runs sequentially in delivery order. The body stays an opaque string —
+  // deserialization is your choice (JSON, protobuf, ...).
+  @QueueHandler()
+  consume(
+    @QueueMessage() message: YandexQueueMessage,
+    @YandexContext() executionContext: YandexExecutionContext,
+  ): void {
+    executionContext.awsRequestId; // cross-transport correlation id
+    message.body; // opaque raw body
+    message.attributes; // verbatim system attributes
+    message.messageAttributes; // camelCase user attributes
+    message.raw; // untouched raw trigger envelope (escape hatch)
+  }
+}
+```
+
+A failing handler fails the whole invocation so retries and dead-letter
+queues keep working. A delivery that reaches an application without any
+`@QueueHandler()` registration fails with `ConnectorError` code
+`NO_QUEUE_HANDLER` instead of being silently acknowledged.
 
 ## Architecture
 

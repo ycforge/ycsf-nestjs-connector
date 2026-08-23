@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Module, type Type } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { buildYandexExecutionContext } from "../context/build-yandex-execution-context";
 import {
@@ -20,6 +20,9 @@ import { httpApiGatewayV2Transport } from "../http/adapter";
 import type { QueueBatch } from "./message";
 import { messageQueueTransport } from "./adapter";
 import { normalizeQueueBatch } from "./normalize-batch";
+import { QueueHandler } from "./queue-handler.decorator";
+// Merged export: the decorator factory plus the normalized message type.
+import { QueueMessage } from "./queue-message.decorator";
 import type { RawQueueEvent, RawQueueMessageEvent } from "./raw-event";
 
 /**
@@ -91,6 +94,34 @@ const RUNTIME_CONTEXT = {
 
 class RootModule {}
 Module({})(RootModule);
+
+/**
+ * Recording consumer for the success-path specs: a plain NestJS provider
+ * whose decorated method records each delivery. Since issue #8 a successful
+ * queue invocation requires at least one @QueueHandler() registration.
+ */
+const HANDLED_MESSAGES: QueueMessage[] = [];
+
+class ProbeQueueConsumer {
+  handle(message: QueueMessage): void {
+    HANDLED_MESSAGES.push(message);
+  }
+}
+
+const PROBE_DESCRIPTOR = methodDescriptorOf(ProbeQueueConsumer.prototype, "handle");
+QueueHandler()(ProbeQueueConsumer.prototype, "handle", PROBE_DESCRIPTOR);
+QueueMessage()(ProbeQueueConsumer.prototype, "handle", 0);
+
+class HandledModule {}
+Module({ providers: [ProbeQueueConsumer] })(HandledModule);
+
+function methodDescriptorOf(target: object, propertyKey: string): TypedPropertyDescriptor<unknown> {
+  const descriptor = Object.getOwnPropertyDescriptor(target, propertyKey);
+  if (!descriptor) {
+    throw new Error(`missing descriptor for ${propertyKey}`);
+  }
+  return descriptor;
+}
 
 async function capturedRejection(promise: Promise<unknown>): Promise<unknown> {
   try {
@@ -182,6 +213,7 @@ describe("message queue transport through the runtime", () => {
 
   beforeEach(() => {
     bootstrapSpy = jest.spyOn(NestFactory, "create");
+    HANDLED_MESSAGES.length = 0;
   });
 
   afterEach(async () => {
@@ -191,10 +223,12 @@ describe("message queue transport through the runtime", () => {
     bootstrapSpy.mockRestore();
   });
 
-  function makeRuntime(): ClosableYandexCloudFunctionHandler {
+  function makeRuntime(
+    appModule: Type<unknown> = HandledModule,
+  ): ClosableYandexCloudFunctionHandler {
     // The public factory registers both built-in transports; queue events
     // must flow through the exact same detect -> init -> dispatch path.
-    const runtime = createYandexHandler(RootModule);
+    const runtime = createYandexHandler(appModule);
     runtimes.push(runtime);
     return runtime;
   }
@@ -211,6 +245,25 @@ describe("message queue transport through the runtime", () => {
     expect(message.queueId).toBe(QUEUE_ID);
     expect(message.eventMetadata.eventType).toBe("yandex.cloud.events.messagequeue.QueueMessage");
     expect(message.attributes["ApproximateReceiveCount"]).toBe("1");
+    // Issue #8: the normalized message reached the registered handler.
+    expect(HANDLED_MESSAGES.map((handled) => handled.messageId)).toEqual([EVENT_ID]);
+
+    await runtime.close();
+  });
+
+  it("fails deliveries of an application without any queue handler as NO_QUEUE_HANDLER", async () => {
+    const runtime = makeRuntime(RootModule);
+
+    const failure = await capturedRejection(runtime(makeQueueDelivery(), RUNTIME_CONTEXT));
+
+    if (!(failure instanceof ConnectorError)) {
+      throw new Error(`expected ConnectorError, received ${String(failure)}`);
+    }
+    // A handler-less application must not silently acknowledge messages
+    // nobody consumed (AGENTS.md section 8.3); the event itself was valid,
+    // so this is its own boundary code, not INVALID_INVOCATION_EVENT.
+    expect(failure.code).toBe("NO_QUEUE_HANDLER");
+    expect(failure.transportId).toBe("message-queue");
 
     await runtime.close();
   });

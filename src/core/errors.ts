@@ -7,7 +7,10 @@ import type { TransportId } from "./transport";
  * codes so applications can branch on stable identifiers instead of messages.
  */
 export type ConnectorErrorCode =
-  "UNKNOWN_INVOCATION_EVENT" | "INVALID_INVOCATION_EVENT" | "UNSUPPORTED_ROUTE_PATTERN";
+  | "UNKNOWN_INVOCATION_EVENT"
+  | "INVALID_INVOCATION_EVENT"
+  | "UNSUPPORTED_ROUTE_PATTERN"
+  | "NO_QUEUE_HANDLER";
 
 /**
  * Diagnostic detail attached to boundary errors. Values must never contain
