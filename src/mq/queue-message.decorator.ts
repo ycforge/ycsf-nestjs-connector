@@ -70,7 +70,9 @@ export function getQueueMessageParameterIndexes(
 /**
  * Re-exports the normalized message contract under the decorator's name so
  * consumers can both call `@QueueMessage()` and type parameters with
- * `QueueMessage` from the same import (the public surface pins exactly this
- * name; docs/ARCHITECTURE.md section 7).
+ * `QueueMessage` — including the application payload type parameter, e.g.
+ * `QueueMessage<OrderEvent>` for `payload: OrderEvent` (issue #9) — from the
+ * same import (the public surface pins exactly this name;
+ * docs/ARCHITECTURE.md section 7).
  */
-export type QueueMessage = NormalizedQueueMessage;
+export type QueueMessage<T = unknown> = NormalizedQueueMessage<T>;

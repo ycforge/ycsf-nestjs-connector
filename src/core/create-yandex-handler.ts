@@ -12,7 +12,8 @@ import type {
   TransportInvocation,
   YandexCloudFunctionHandler,
 } from "./transport";
-import { BUILTIN_TRANSPORTS } from "./transports";
+import type { CreateYandexHandlerOptions } from "./handler-options";
+import { createBuiltinTransports } from "./transports";
 
 /**
  * Handler returned by {@link createYandexHandler}: the exact
@@ -45,9 +46,17 @@ export interface ClosableYandexCloudFunctionHandler extends YandexCloudFunctionH
  * applications (AGENTS.md section 10). All per-invocation data travels
  * through the transport invocation object — nothing invocation-scoped is
  * retained between calls (AGENTS.md section 11).
+ *
+ * `options` is optional; without it every transport runs its documented
+ * default behavior. Currently only `options.queue` exists (issue #9): it may
+ * install a custom queue body deserializer replacing the default strict-JSON
+ * policy.
  */
-export function createYandexHandler(appModule: Type<unknown>): ClosableYandexCloudFunctionHandler {
-  return createInvocationRuntime(appModule, BUILTIN_TRANSPORTS);
+export function createYandexHandler(
+  appModule: Type<unknown>,
+  options?: CreateYandexHandlerOptions,
+): ClosableYandexCloudFunctionHandler {
+  return createInvocationRuntime(appModule, createBuiltinTransports(options));
 }
 
 /**

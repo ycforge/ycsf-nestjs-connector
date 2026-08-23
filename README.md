@@ -117,20 +117,26 @@ import {
   type YandexExecutionContext,
 } from "@ycforge/ycsf-nestjs-connector";
 
+interface OrderEvent {
+  orderId: string;
+  items: number;
+}
+
 @Injectable()
 export class OrdersConsumer {
   // Every @QueueHandler() method receives EVERY delivered message; a batch
-  // runs sequentially in delivery order. The body stays an opaque string —
-  // deserialization is your choice (JSON, protobuf, ...).
+  // runs sequentially in delivery order. QueueMessage<T> types the decoded
+  // payload; the raw body stays available beside it.
   @QueueHandler()
   consume(
-    @QueueMessage() message: YandexQueueMessage,
+    @QueueMessage() message: YandexQueueMessage<OrderEvent>,
     @YandexContext() executionContext: YandexExecutionContext,
   ): void {
     executionContext.awsRequestId; // cross-transport correlation id
-    message.body; // opaque raw body
+    message.payload.orderId; // deserialized application payload (see below)
+    message.body; // exact raw body string, always preserved
     message.attributes; // verbatim system attributes
-    message.messageAttributes; // camelCase user attributes
+    message.messageAttributes; // camelCase user attributes, lossless strings
     message.raw; // untouched raw trigger envelope (escape hatch)
   }
 }
@@ -140,6 +146,43 @@ A failing handler fails the whole invocation so retries and dead-letter
 queues keep working. A delivery that reaches an application without any
 `@QueueHandler()` registration fails with `ConnectorError` code
 `NO_QUEUE_HANDLER` instead of being silently acknowledged.
+
+#### Body payloads and message attributes
+
+`QueueMessage` keeps three representation levels apart:
+
+- **Raw** — `body` (the exact delivered string) and everything under `raw`.
+- **Normalized** — identity, checksums, attributes and metadata in their
+  observed forms; strings stay strings.
+- **Payload** — `message.payload`, decoded on first access by the configured
+  strategy and memoized per message.
+
+Default policy is strict JSON: valid JSON becomes exactly what `JSON.parse`
+produces (no Date revival, no numeric rewriting); anything else — plain
+text, empty or malformed bodies — fails deterministically with
+`ConnectorError` code `QUEUE_BODY_DESERIALIZATION_FAILED` inside the handler
+round that reads it. Nothing is parsed for messages nobody consumes, and a
+bad body never corrupts normalization of the rest of the delivery. Queues
+that do not carry JSON stay fully usable through `body`, or through an
+explicit custom deserializer:
+
+```ts
+const handler = createYandexHandler(AppModule, {
+  queue: {
+    deserializeBody: (body: string) => protobuf.decode(Buffer.from(body, "utf8")),
+  },
+});
+```
+
+The strategy receives `(body, message)` — its return value (including
+`undefined`) becomes `payload`, and its failures propagate verbatim like
+handler failures.
+
+Message attributes are never decoded: `{ dataType, stringValue }` preserves
+the original `string_value` exactly, Number-typed values keep their precise
+string form (conversion is your deliberate step), unknown future data types
+flow through unchanged, and `md5OfMessageAttributes` passes through
+verbatim.
 
 ## Architecture
 

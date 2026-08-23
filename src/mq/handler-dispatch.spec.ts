@@ -6,6 +6,7 @@ import {
 import { resolveInvocationQueueBatch } from "../context/invocation-scope";
 import { YandexContext } from "../context/yandex-context.decorator";
 import type { YandexExecutionContext } from "../context/yandex-execution-context";
+import { ConnectorError } from "../core/connector-error";
 import type { QueueBatch } from "./message";
 import { QueueHandler } from "./queue-handler.decorator";
 // Merged export: the decorator factory plus the normalized message type.
@@ -35,7 +36,8 @@ const RUNTIME_CONTEXT = {
   logGroupName: "",
 };
 
-function makeMessageEnvelope(messageId: string = EVENT_ID): RawQueueMessageEvent {
+function makeMessageEnvelope(messageId: string = EVENT_ID, body?: string): RawQueueMessageEvent {
+  const resolvedBody = body ?? '{"orderId":"order-fixture","items":3}';
   return {
     event_metadata: {
       event_id: messageId,
@@ -49,8 +51,10 @@ function makeMessageEnvelope(messageId: string = EVENT_ID): RawQueueMessageEvent
       queue_id: QUEUE_ID,
       message: {
         message_id: messageId,
+        // Checksums are fixtures only: the connector passes them through
+        // verbatim and never verifies them against the body.
         md5_of_body: "9e107d9d372bb6826bd81d3542a419d6",
-        body: '{"orderId":"order-fixture","items":3}',
+        body: resolvedBody,
         attributes: {
           ApproximateReceiveCount: "1",
           SentTimestamp: "1787328274187",
@@ -114,6 +118,61 @@ QueueMessage()(FailingConsumer.prototype, "handle", 0);
 
 class RecordingModule {}
 Module({ providers: [RecordingConsumer] })(RecordingModule);
+
+/**
+ * Payload-level fixtures (issue #9): the consumer types the injected message
+ * generically and reads the deserialized payload, while raw fields stay
+ * observable beside it.
+ */
+interface OrderPayload {
+  orderId?: string;
+  items?: number;
+}
+
+class PayloadConsumer {
+  static readonly rounds: {
+    messageId?: string;
+    orderId?: string;
+    items?: number;
+    bodyLength?: number;
+    rawBodyPresent?: boolean;
+  }[] = [];
+
+  handle(message: QueueMessage<OrderPayload>): void {
+    PayloadConsumer.rounds.push({
+      messageId: message?.messageId,
+      orderId: message?.payload?.orderId,
+      items: message?.payload?.items,
+      bodyLength: message?.body?.length,
+      rawBodyPresent: typeof message?.raw?.details?.message?.body === "string",
+    });
+  }
+}
+
+const PAYLOAD_DESCRIPTOR = Object.getOwnPropertyDescriptor(PayloadConsumer.prototype, "handle")!;
+QueueHandler()(PayloadConsumer.prototype, "handle", PAYLOAD_DESCRIPTOR);
+QueueMessage()(PayloadConsumer.prototype, "handle", 0);
+
+class TextConsumer {
+  static readonly payloads: string[] = [];
+
+  handle(message: QueueMessage<string>): void {
+    TextConsumer.payloads.push(message.payload);
+  }
+}
+
+QueueHandler()(
+  TextConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(TextConsumer.prototype, "handle")!,
+);
+QueueMessage()(TextConsumer.prototype, "handle", 0);
+
+class PayloadModule {}
+Module({ providers: [PayloadConsumer] })(PayloadModule);
+
+class TextModule {}
+Module({ providers: [TextConsumer] })(TextModule);
 
 class FailingModule {}
 Module({ providers: [FailingConsumer] })(FailingModule);
@@ -244,6 +303,8 @@ describe("queue handler dispatch through the public runtime", () => {
 
   beforeEach(() => {
     RecordingConsumer.rounds.length = 0;
+    PayloadConsumer.rounds.length = 0;
+    TextConsumer.payloads.length = 0;
     RequestScopedConsumer.rounds.length = 0;
     TransientScopedConsumer.rounds.length = 0;
     SingletonScopedConsumer.rounds.length = 0;
@@ -464,6 +525,108 @@ describe("queue handler dispatch through the public runtime", () => {
     expect(result).not.toHaveProperty("statusCode");
     expect(result).not.toHaveProperty("isBase64Encoded");
     expect(result).not.toHaveProperty("headers");
+    await runtime.close();
+  });
+
+  it("injects the decoded typed payload while raw representations stay accessible", async () => {
+    const runtime = makeRuntime(PayloadModule);
+
+    await runtime(makeQueueDelivery(), RUNTIME_CONTEXT);
+
+    const round = PayloadConsumer.rounds[0];
+    // The generic QueueMessage<OrderPayload> surfaces payload.orderId at
+    // compile time; at runtime it is the JSON-decoded body.
+    expect(round?.orderId).toBe("order-fixture");
+    expect(round?.items).toBe(3);
+    // Raw transport representation remains byte-identical beside the payload.
+    expect(round?.bodyLength).toBe('{"orderId":"order-fixture","items":3}'.length);
+    expect(round?.rawBodyPresent).toBe(true);
+    await runtime.close();
+  });
+
+  it("pairs every message of a batch with its own decoded payload", async () => {
+    const runtime = makeRuntime(PayloadModule);
+    const delivery: RawQueueEvent = {
+      messages: [
+        makeMessageEnvelope("pl-first", '{"orderId":"first","items":1}'),
+        makeMessageEnvelope("pl-second", '{"orderId":"second","items":2}'),
+        makeMessageEnvelope("pl-third", '{"orderId":"third","items":3}'),
+      ],
+    };
+
+    await runtime(delivery, RUNTIME_CONTEXT);
+
+    // Per-message memoization: order preserved, payloads never crossed.
+    expect(PayloadConsumer.rounds.map((round) => `${round.messageId}:${round.orderId}`)).toEqual([
+      "pl-first:first",
+      "pl-second:second",
+      "pl-third:third",
+    ]);
+    await runtime.close();
+  });
+
+  it("fails invocations whose payload cannot be decoded under the default policy", async () => {
+    const runtime = makeRuntime(PayloadModule);
+    const delivery: RawQueueEvent = {
+      messages: [
+        makeMessageEnvelope("broken-json"),
+        makeMessageEnvelope("broken-json-2", "definitely not json"),
+      ],
+    };
+
+    let caught: unknown;
+    try {
+      await runtime(delivery, RUNTIME_CONTEXT);
+    } catch (error) {
+      caught = error;
+    }
+
+    // Deterministic boundary failure, not a silent arbitrary object; the
+    // first message was consumed before the poisoned one stopped the run.
+    expect(caught).toBeInstanceOf(ConnectorError);
+    expect((caught as ConnectorError).code).toBe("QUEUE_BODY_DESERIALIZATION_FAILED");
+    expect(PayloadConsumer.rounds.map((round) => round.messageId)).toEqual(["broken-json"]);
+    await runtime.close();
+  });
+
+  it("decodes bodies through a configured custom deserializer", async () => {
+    const configured = createYandexHandler(TextModule, {
+      queue: { deserializeBody: (body) => `decoded:${body}` },
+    });
+    runtimes.push(configured);
+    const delivery: RawQueueEvent = {
+      messages: [makeMessageEnvelope(EVENT_ID, "plain text")],
+    };
+
+    await configured(delivery, RUNTIME_CONTEXT);
+
+    // Plain-text queues stay usable when an explicit strategy is installed.
+    expect(TextConsumer.payloads).toEqual(["decoded:plain text"]);
+    await configured.close();
+  });
+
+  it("isolates payload decoding between concurrent invocations", async () => {
+    const runtime = makeRuntime(PayloadModule);
+
+    await Promise.all([
+      runtime(
+        { messages: [makeMessageEnvelope("cx-payload-a", '{"orderId":"a"}')] },
+        RUNTIME_CONTEXT,
+      ),
+      runtime(
+        { messages: [makeMessageEnvelope("cx-payload-b", '{"orderId":"b"}')] },
+        RUNTIME_CONTEXT,
+      ),
+    ]);
+
+    // Warm-application concurrency: each invocation decodes its own message
+    // and no payload crosses the isolation boundary.
+    expect(new Set(PayloadConsumer.rounds.map((round) => round.orderId))).toEqual(
+      new Set(["a", "b"]),
+    );
+    for (const round of PayloadConsumer.rounds) {
+      expect(round.orderId).toBe(round.messageId?.replace("cx-payload-", ""));
+    }
     await runtime.close();
   });
 });

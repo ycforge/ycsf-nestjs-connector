@@ -2,6 +2,7 @@ import type {
   HasRaw,
   NormalizedHttpRequest,
   QueueBatch,
+  QueueMessage,
   RawHttpApiGatewayV2Event,
   RawQueueEvent,
   TransportAdapter,
@@ -98,6 +99,50 @@ describe("queue contracts", () => {
     };
 
     expect(Array.isArray(delivery.messages)).toBe(true);
+  });
+
+  it("types QueueMessage<T> so payload is T while raw body stays a string", () => {
+    // Compile-time pin for the issue #9 contract: the deserialized payload is
+    // consumer-typed, the transport representation stays opaque, and message
+    // attributes keep their lossless string form.
+    interface FixturePayload {
+      readonly id: string;
+    }
+    const message: QueueMessage<FixturePayload> = {
+      raw: {} as RawQueueEvent["messages"][number],
+      messageId: "m-fixture",
+      md5OfBody: "md5-fixture",
+      body: '{"id":"fixture"}',
+      attributes: {},
+      messageAttributes: {
+        Attempt: { dataType: "Number", stringValue: "1" },
+      },
+      md5OfMessageAttributes: "",
+      queueId: "queue-fixture",
+      eventMetadata: {
+        eventId: "m-fixture",
+        eventType: "type",
+        createdAt: "2026-08-21T21:44:34.266Z",
+        tracingContext: null,
+        cloudId: "cloud",
+        folderId: "folder",
+      },
+      payload: { id: "fixture" },
+    };
+
+    const payloadId: string = message.payload.id;
+    const rawBody: string = message.body;
+    // Attribute values are strings by construction — no numeric coercion in
+    // the type system either.
+    const attemptValue: string = message.messageAttributes["Attempt"]!.stringValue;
+
+    expect(payloadId).toBe("fixture");
+    expect(rawBody).toBe('{"id":"fixture"}');
+    expect(attemptValue).toBe("1");
+
+    // QueueMessage without an argument defaults its payload to unknown.
+    const untyped: QueueMessage = message;
+    expect(typeof untyped.payload).toBe("object");
   });
 });
 

@@ -63,29 +63,31 @@ Visibility tiers:
   only the `"."` subpath, so deep imports of `dist/**` are blocked by the
   package resolver; internal modules may change at any time.
 
-| Module                                          | Visibility | Responsibility                                               |
-| ----------------------------------------------- | ---------- | ------------------------------------------------------------ |
-| `src/core/transport.ts`                         | Public     | Transport SPI: adapter contract, handler type, container ref |
-| `src/core/raw-access.ts`                        | Public     | `HasRaw` mixin contract for lossless raw access              |
-| `src/core/errors.ts`                            | Public     | Error taxonomy codes for unknown/invalid invocations         |
-| `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)       |
-| `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)     |
-| `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)        |
-| `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point        |
-| `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                |
-| `src/http/normalized-request.ts`                | Public     | Normalized HTTP request contract                             |
-| `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                  |
-| `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)         |
-| `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts                     |
-| `src/mq/queue-handler.decorator.ts`             | Public     | `@QueueHandler()` method registration (#8)                   |
-| `src/mq/queue-message.decorator.ts`             | Public     | `@QueueMessage()` registration + merged message type (#8)    |
-| `src/mq/dispatch.ts`                            | Internal   | Queue handler discovery + per-message fan-out dispatch (#8)  |
-| `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                  |
-| `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)            |
-| `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                  |
-| `src/context/yandex-context.decorator.ts`       | Public     | `@YandexContext()` implementation (#4)                       |
-| `src/decorators/decorator-contracts.ts`         | Public     | Signatures of the three decorators                           |
-| `src/http/*`, `src/mq/*` adapters               | Internal   | Behavior implementing the above contracts (#5–#8)            |
+| Module                                          | Visibility | Responsibility                                                |
+| ----------------------------------------------- | ---------- | ------------------------------------------------------------- |
+| `src/core/transport.ts`                         | Public     | Transport SPI: adapter contract, handler type, container ref  |
+| `src/core/raw-access.ts`                        | Public     | `HasRaw` mixin contract for lossless raw access               |
+| `src/core/errors.ts`                            | Public     | Error taxonomy codes for unknown/invalid invocations          |
+| `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)        |
+| `src/core/handler-options.ts`                   | Public     | `createYandexHandler` options incl. queue deserializer (#9)   |
+| `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)      |
+| `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)         |
+| `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point         |
+| `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                 |
+| `src/http/normalized-request.ts`                | Public     | Normalized HTTP request contract                              |
+| `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                   |
+| `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)          |
+| `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts + body strategy (#9) |
+| `src/mq/queue-handler.decorator.ts`             | Public     | `@QueueHandler()` method registration (#8)                    |
+| `src/mq/queue-message.decorator.ts`             | Public     | `@QueueMessage()` registration + merged message type (#8)     |
+| `src/mq/dispatch.ts`                            | Internal   | Queue handler discovery + per-message fan-out dispatch (#8)   |
+| `src/mq/body-deserialization.ts`                | Internal   | Default strict-JSON policy + memoized payload reader (#9)     |
+| `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                   |
+| `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)             |
+| `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                   |
+| `src/context/yandex-context.decorator.ts`       | Public     | `@YandexContext()` implementation (#4)                        |
+| `src/decorators/decorator-contracts.ts`         | Public     | Signatures of the three decorators                            |
+| `src/http/*`, `src/mq/*` adapters               | Internal   | Behavior implementing the above contracts (#5–#8)             |
 
 Rules:
 
@@ -264,7 +266,10 @@ become `INVALID_INVOCATION_EVENT` with value-free diagnostics naming only
 field paths) and transforms the delivery into the normalized `QueueBatch`:
 one typed envelope per message with event metadata, queue id, message
 identity, verbatim system attributes, camelCase user attributes, checksums,
-the opaque raw body and untouched `raw` references throughout. The batch is
+the opaque raw body and untouched `raw` references throughout. Each envelope
+additionally carries a lazy, memoized `payload` getter bound to the
+configured body deserializer — normalization itself never interprets bodies
+(issue #9, section 5.1 below). The batch is
 published to the invocation scope (mirroring the HTTP request) and handed to
 queue handler dispatch (issue #8): discovery walks the warm application
 container once per application for methods marked `@QueueHandler()` — modules
@@ -312,6 +317,66 @@ Consequences enforced by this rule:
   `createdAt` stays ISO string, repeated query parameters keep both their
   comma-joined (`queryStringParameters`) and list (`multiValueParameters`)
   forms without merging them (AGENTS.md §4.3, §5).
+
+### 5.1 Queue body deserialization and message attributes (#9)
+
+Four representation levels exist for a queue delivery and are kept strictly
+distinct:
+
+1. **Raw transport representation** — the trigger event reachable through
+   `raw` (snake_case, additive fields included) plus `QueueMessage.body`, the
+   exact UTF-8 string Yandex delivered. Never rewritten by any code path.
+2. **Normalized message representation** — identity, checksums, system/user
+   attributes and metadata in their observed forms. Strings stay strings.
+3. **Deserialized application payload** — `QueueMessage<T>.payload: T`,
+   produced on first access by the configured strategy and memoized per
+   message instance.
+4. **Message attribute representation** — `{ dataType, stringValue }` per
+   named user attribute; see below.
+
+**Why lazy rather than eager normalization:** deserialization happens when
+the application first reads `payload`, never during transport normalization.
+This preserves the transport/application separation (AGENTS.md §32 — bodies
+are opaque at the transport boundary), keeps undecodable bodies from
+corrupting otherwise valid deliveries, skips parsing for messages whose
+handlers only read metadata, and gives default and custom strategies one
+uniform behavior. The outcome — value or failure — is computed exactly once
+per message instance and replayed on repeated access, so fan-out handlers of
+one round observe one consistent payload and side-effecting custom
+strategies run once.
+
+**Default policy: strict JSON.** Valid JSON text decodes to exactly what
+`JSON.parse` produces (objects, arrays, strings, numbers, booleans, null) —
+no reviver, no Date revival, no numeric rewriting beyond normal JSON.parse
+semantics. Anything else (plain text, empty body, malformed JSON, BOM-prefixed
+text) fails deterministically with `QUEUE_BODY_DESERIALIZATION_FAILED`. The
+underlying `SyntaxError` is deliberately dropped because its message can
+quote body fragments; boundary diagnostics stay value-free (AGENTS.md §6.2).
+Non-JSON queues remain fully usable through `body`; applications that want
+string payloads install an explicit identity-style deserializer instead of
+the connector guessing.
+
+**Custom deserializer:** `createYandexHandler(AppModule, { queue: {
+deserializeBody }) }` replaces the default policy for every delivery that
+runtime handles. The strategy receives `(body, message)` — the exact raw
+string plus the normalized message, so it may branch on attributes or
+metadata — and its return value becomes `payload` (`undefined` included).
+Failures propagate verbatim into the consuming handler round, unwrapped,
+exactly like handler failures.
+
+**Invalid JSON cannot corrupt handling:** a decode failure surfaces inside
+exactly the handler round that reads `payload` and propagates as an
+invocation failure through the ordinary fail-fast semantics (§6.2), keeping
+Message Queue retry/dead-letter configuration effective. Normalization,
+sibling messages already processed, and raw access all remain unaffected.
+
+**Message attributes are never decoded.** `{ dataType, stringValue }`
+preserves the original `string_value` byte-for-byte: Number-typed attributes
+keep their exact string form so precision-sensitive values survive without
+loss, converting them is a deliberate consumer step (`Number(...)`, bigint
+parsing), unknown/future `data_type` values normalize through the same shape
+instead of being rejected, and `md5_of_message_attributes` passes through
+verbatim alongside everything else.
 
 ## 6. Error semantics
 
@@ -376,16 +441,23 @@ async semantics.
   `NO_QUEUE_HANDLER` instead of succeeding silently: nobody consumed the
   message, so retry/dead-letter configuration must observe it (AGENTS.md
   §8.3).
+- A body that cannot be decoded under the default JSON policy fails the
+  consuming handler round with `QUEUE_BODY_DESERIALIZATION_FAILED`
+  (issue #9, §5.1); custom deserializer failures propagate verbatim. Both are
+  ordinary invocation failures — retry/dead-letter configuration observes
+  them.
 
 ### 6.3 Boundary errors
 
-Three error codes are reserved at the runtime boundary (`src/core/errors.ts`):
+Five error codes are reserved at the runtime boundary (`src/core/errors.ts`):
 
-| Code                       | Meaning                                                                             |
-| -------------------------- | ----------------------------------------------------------------------------------- |
-| `UNKNOWN_INVOCATION_EVENT` | No transport claimed the event (diagnostic, non-secret detail)                      |
-| `INVALID_INVOCATION_EVENT` | A claiming transport failed deeper structural validation                            |
-| `NO_QUEUE_HANDLER`         | The Message Queue transport claimed a delivery but no `@QueueHandler()` exists (#8) |
+| Code                                | Meaning                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `UNKNOWN_INVOCATION_EVENT`          | No transport claimed the event (diagnostic, non-secret detail)                                 |
+| `INVALID_INVOCATION_EVENT`          | A claiming transport failed deeper structural validation                                       |
+| `UNSUPPORTED_ROUTE_PATTERN`         | A route outside the documented matching subset was registered (#5)                             |
+| `NO_QUEUE_HANDLER`                  | The Message Queue transport claimed a delivery but no `@QueueHandler()` exists (#8)            |
+| `QUEUE_BODY_DESERIALIZATION_FAILED` | Default strict-JSON policy could not decode a consumed queue body; value-free diagnostics (#9) |
 
 Concrete error classes: `ConnectorError` (issue #3) implements both codes and
 is thrown at the detection boundary; transports raise
@@ -401,8 +473,9 @@ Defined now (exported from `src/index.ts`):
 
 | Export                                                                                       | Kind  | Purpose                                                                                                     |
 | -------------------------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------- |
-| `createYandexHandler`                                                                        | value | Central entry point: module -> function handler (#3)                                                        |
+| `createYandexHandler`                                                                        | value | Central entry point: module (+ optional options, #9) -> function handler (#3)                               |
 | `ClosableYandexCloudFunctionHandler`                                                         | type  | Handler plus `close()` teardown hook (#3)                                                                   |
+| `CreateYandexHandlerOptions`, `QueueTransportOptions`                                        | type  | Entry-point options; queue body deserializer configuration (#9)                                             |
 | `ConnectorError`                                                                             | value | Boundary error carrying the taxonomy codes (#3)                                                             |
 | `YandexCloudFunctionHandler`                                                                 | type  | Signature the function runtime calls                                                                        |
 | `TransportAdapter`                                                                           | type  | SPI each transport implements                                                                               |
@@ -416,12 +489,17 @@ Defined now (exported from `src/index.ts`):
 | `NormalizedHttpRequest`                                                                      | type  | Canonical normalized request                                                                                |
 | `YandexFunctionHttpResponse`                                                                 | type  | Response envelope returned to the runtime                                                                   |
 | `RawQueueEvent`, `RawQueueMessageEvent`, `RawQueueMessageAttributeValue`                     | type  | Observed raw MQ event                                                                                       |
-| `QueueBatch`, `QueueMessage`, `QueueEventMetadata`, `QueueMessageAttribute`                  | type  | Normalized MQ models                                                                                        |
+| `QueueBatch`, `QueueMessage<T>`, `QueueEventMetadata`, `QueueMessageAttribute`               | type  | Normalized MQ models; `payload: T` is the deserialized application payload (#9)                             |
+| `QueueBodyDeserializer`                                                                      | type  | Custom queue body decoding strategy contract (#9)                                                           |
 | `YandexExecutionContext`                                                                     | type  | Normalized execution context (**observed**)                                                                 |
 | `ContextParameterDecorator`, `QueueMessageParameterDecorator`, `QueueHandlerMethodDecorator` | type  | Decorator signatures                                                                                        |
 | `YandexContext()`                                                                            | value | Parameter injection of the normalized context (#4)                                                          |
 | `QueueHandler()`                                                                             | value | Marks provider/controller methods as Message Queue consumers (#8)                                           |
-| `QueueMessage()` (+ type)                                                                    | value | Parameter injection of the current queue message; the same name also names the normalized message type (#8) |
+| `QueueMessage()` (+ type)                                                                    | value | Parameter injection of the current queue message; the same name also names the generic message type (#8/#9) |
+
+The default JSON policy and payload memoization mechanics
+(`src/mq/body-deserialization.ts`) are deliberately internal: consumers shape
+behavior exclusively through `QueueBodyDeserializer`.
 
 The runtime value exports are pinned in two places that must stay in sync with
 this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
@@ -456,6 +534,6 @@ this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
 | HTTP response/error mapping            | §6.1               | #6             |
 | MQ event adapter                       | §4, §5             | #7             |
 | Queue decorators/dispatch              | §6.2, §7           | #8             |
-| Body deserialization, attributes       | §5                 | #9             |
+| Body deserialization, attributes       | §4, §5.1, §6.2, §7 | #9             |
 | Unified error/retry/acknowledgement    | §6.3               | #10            |
 | Redaction/security utilities           | §6.3               | #13            |
