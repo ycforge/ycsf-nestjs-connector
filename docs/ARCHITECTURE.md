@@ -71,6 +71,7 @@ Visibility tiers:
 | `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)                                                                            |
 | `src/core/handler-options.ts`                   | Public     | `createYandexHandler` options incl. queue deserializer (#9)                                                                       |
 | `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)                                                                          |
+| `src/core/safe-diagnostics.ts`                  | Public     | `safeDiagnostics`: explicit redaction policy between raw data and diagnostics (#13)                                               |
 | `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)                                                                             |
 | `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point                                                                             |
 | `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                                                                                     |
@@ -564,8 +565,56 @@ The connector's own diagnostics are value-free by construction (AGENTS.md
 - The connector itself performs no logging. Framework-internal logging
   (Nest's logger reporting an unhandled exception) remains framework behavior;
   applications decide how to instrument via `@YandexContext()`, stable error
-  codes and the raw escape hatches. Structured redaction utilities land with
-  issue #13.
+  codes and the raw escape hatches.
+
+### 6.5.1 The `safeDiagnostics` redaction utility (issue #13)
+
+`safeDiagnostics(value)` from `src/core/safe-diagnostics.ts` is the explicit,
+single boundary between raw invocation data and safe diagnostic output for
+application-side logging and test assertions (AGENTS.md §6.2, §33). It is pure
+(never mutates input, freshly built plain output), deterministic and JSON-safe;
+the full policy is documented in the module header. Summary:
+
+- **Raw stays out**: keys named exactly `raw`/`rawEvent` are omitted entirely;
+  nothing follows raw escape hatches.
+- **Credentials/personal data**:
+  - `token` is replaced with `REDACTED_TOKEN` on the serialized root value and
+    on any nested node matching the runtime-context fingerprint (own
+    `awsRequestId` + `functionName` + `token`), so wrappers like
+    `{ message: "...", ctx: context }` are safe; other nested `token`
+    properties pass verbatim (documented scope — business payloads may own
+    domain fields of that name).
+  - Inside any property named exactly `headers`: case-insensitive entry match
+    for `Authorization` → `REDACTED_AUTHORIZATION`, `Cookie` →
+    `REDACTED_COOKIE`, `X-Forwarded-For` / `X-Envoy-External-Address` /
+    `X-Real-Remote-Address` → `REDACTED_IP`. Correlation identifiers
+    (`X-Request-Id`, `X-Trace-Id`, `Uber-Trace-Id`, `Traceparent`) are kept
+    verbatim by deliberate policy (DATA-ANALYSE.md §H classifies them as
+    low-sensitivity; observability needs them, AGENTS.md §33).
+  - `sourceIp` at any depth → `REDACTED_IP`.
+  - Gateway-declared parameter maps (`parameters`, `queryStringParameters`,
+    `multiValueParameters`) duplicate spec-declared cookies/headers under
+    their declared names (observed, DATA-ANALYSE.md anomaly 10); wherever such
+    a map appears, entries named `authorization` or containing `cookie`
+    become placeholders, preserving single-value vs array representations.
+  - `rawQueryString` is NOT parsed: query strings may embed credentials, but
+    rewriting them would corrupt canonical request representation (§4.2);
+    callers who consider them sensitive must avoid serializing them.
+- **Payload carriers**: a normalized queue message serializes to identity/
+  metadata plus attribute NAMES only (no body, no lazy `payload`, no attribute
+  values); a recognized raw API Gateway v2 event drops its `body`; a
+  recognized raw MQ wire message drops its `body` and renders
+  `message_attributes` as name → declared `dataType`. Business objects that
+  merely own `body`/`token` fields are untouched.
+- **Errors** collapse to `{ name }` (`+ code`, `transportId` for
+  `ConnectorError`) — never message, stack or cause chains.
+- **Traversal safety**: getters are never evaluated (rendered
+  `[unevaluated getter]`), cycles terminate as `[circular]` while shared
+  references survive, Dates/binaries/bigints render JSON-safely.
+
+Non-goals: no security framework, no proxy traversal guarantees, no opinionated
+tracing SDK; the replay CLI's stricter value-free rendering (#12) is unchanged
+and deliberately shares no logic with this module.
 
 ## 7. Public API surface
 
@@ -598,6 +647,7 @@ Defined now (exported from `src/index.ts`):
 | `YandexContext()`                                                                            | value | Parameter injection of the normalized context (#4)                                                          |
 | `QueueHandler()`                                                                             | value | Marks provider/controller methods as Message Queue consumers (#8)                                           |
 | `QueueMessage()` (+ type)                                                                    | value | Parameter injection of the current queue message; the same name also names the generic message type (#8/#9) |
+| `safeDiagnostics`                                                                            | value | Redacting JSON-safe serializer for raw events, models, contexts and errors (#13)                            |
 
 The default JSON policy and payload memoization mechanics
 (`src/mq/body-deserialization.ts`) are deliberately internal: consumers shape

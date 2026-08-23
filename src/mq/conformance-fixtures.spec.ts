@@ -7,6 +7,7 @@ import {
 import type { YandexExecutionContext } from "../context/yandex-execution-context";
 import { ConnectorError } from "../core/connector-error";
 import { createYandexHandler } from "../core/create-yandex-handler";
+import { safeDiagnostics } from "../core/safe-diagnostics";
 import type { QueueBatch } from "./message";
 import { QueueHandler } from "./queue-handler.decorator";
 // Merged export: decorator factory plus the normalized message type it injects.
@@ -303,6 +304,48 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     // The undocumented _data mirror stays reachable and carries the fixture's
     // own (sanitized) event: structural mirror, not original runtime data.
     expect((captured.executionContext.raw as { _data?: unknown })._data).toEqual(fixture.event);
+  });
+
+  it("keeps queue bodies and attribute values out of safe diagnostics (issue #13)", async () => {
+    const { fixture, captured, close } = await replay("custom-message-attributes");
+    await close();
+
+    const envelope = fixture.event.messages[0]!.details;
+    const serialized = safeDiagnostics({
+      message: captured.message,
+      executionContext: captured.executionContext,
+      event: fixture.event,
+    }) as {
+      message: Record<string, unknown>;
+      event: { messages: Array<{ details: { message: Record<string, unknown> } }> };
+    };
+
+    // Bodies never enter generic diagnostics — neither the normalized model
+    // nor the raw wire fingerprint.
+    const renderedJson = JSON.stringify(serialized);
+    expect(renderedJson).not.toContain(envelope.message.body);
+    expect(serialized.message).not.toHaveProperty("body");
+    expect(serialized.event.messages[0]!.details.message).not.toHaveProperty("body");
+
+    // Message-attribute VALUES may carry secrets; only names (plus declared
+    // types on the raw wire) surface — asserted structurally so trivially
+    // short values ("1") cannot produce false passes/failures.
+    expect(serialized.message["messageAttributeNames"]).toEqual(
+      Object.keys(envelope.message.message_attributes),
+    );
+    const renderedRawAttributes = serialized.event.messages[0]!.details.message[
+      "message_attributes"
+    ] as Record<string, { dataType?: string; string_value?: string }>;
+    for (const [name, declaration] of Object.entries(envelope.message.message_attributes)) {
+      expect(Object.keys(renderedRawAttributes[name]!)).toEqual(["dataType"]);
+      expect(renderedRawAttributes[name]!.dataType).toBe(declaration.data_type);
+    }
+
+    // Identity, checksums and metadata stay available for correlation.
+    expect(serialized.message["messageId"]).toBe(envelope.message.message_id);
+    expect(serialized.message["md5OfBody"]).toBe(envelope.message.md5_of_body);
+    expect(serialized.message["queueId"]).toBe(envelope.queue_id);
+    expect(renderedJson).toContain(fixture.context.awsRequestId);
   });
 
   it("isolates sequential replays across warm invocations", async () => {
