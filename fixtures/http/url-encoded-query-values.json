@@ -65,15 +65,9 @@
       "punct": "/?&=%#+"
     },
     "multiValueParameters": {
-      "ID": [
-        "probe/query"
-      ],
-      "text": [
-        "тест"
-      ],
-      "punct": [
-        "/?&=%#+"
-      ]
+      "ID": ["probe/query"],
+      "text": ["тест"],
+      "punct": ["/?&=%#+"]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -149,15 +143,9 @@
         "punct": "/?&=%#+"
       },
       "multiValueParameters": {
-        "ID": [
-          "probe/query"
-        ],
-        "text": [
-          "тест"
-        ],
-        "punct": [
-          "/?&=%#+"
-        ]
+        "ID": ["probe/query"],
+        "text": ["тест"],
+        "punct": ["/?&=%#+"]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

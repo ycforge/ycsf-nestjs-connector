@@ -60,9 +60,7 @@
       "ID": "probe/with space/and/encoded"
     },
     "multiValueParameters": {
-      "ID": [
-        "probe/with space/and/encoded"
-      ]
+      "ID": ["probe/with space/and/encoded"]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -133,9 +131,7 @@
         "ID": "probe/with space/and/encoded"
       },
       "multiValueParameters": {
-        "ID": [
-          "probe/with space/and/encoded"
-        ]
+        "ID": ["probe/with space/and/encoded"]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

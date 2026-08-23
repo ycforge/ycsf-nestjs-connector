@@ -66,15 +66,9 @@
       "test_cookie": "cookie-value"
     },
     "multiValueParameters": {
-      "ID": [
-        "probe/ping"
-      ],
-      "X-Test-Header": [
-        "header-value"
-      ],
-      "test_cookie": [
-        "cookie-value"
-      ]
+      "ID": ["probe/ping"],
+      "X-Test-Header": ["header-value"],
+      "test_cookie": ["cookie-value"]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -151,15 +145,9 @@
         "test_cookie": "cookie-value"
       },
       "multiValueParameters": {
-        "ID": [
-          "probe/ping"
-        ],
-        "X-Test-Header": [
-          "header-value"
-        ],
-        "test_cookie": [
-          "cookie-value"
-        ]
+        "ID": ["probe/ping"],
+        "X-Test-Header": ["header-value"],
+        "test_cookie": ["cookie-value"]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

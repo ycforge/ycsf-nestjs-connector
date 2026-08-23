@@ -63,17 +63,9 @@
       "flag": "on"
     },
     "multiValueParameters": {
-      "ID": [
-        "probe/query"
-      ],
-      "multi": [
-        "one",
-        "two",
-        "three"
-      ],
-      "flag": [
-        "on"
-      ]
+      "ID": ["probe/query"],
+      "multi": ["one", "two", "three"],
+      "flag": ["on"]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -147,17 +139,9 @@
         "flag": "on"
       },
       "multiValueParameters": {
-        "ID": [
-          "probe/query"
-        ],
-        "multi": [
-          "one",
-          "two",
-          "three"
-        ],
-        "flag": [
-          "on"
-        ]
+        "ID": ["probe/query"],
+        "multi": ["one", "two", "three"],
+        "flag": ["on"]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }

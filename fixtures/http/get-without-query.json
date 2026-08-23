@@ -58,9 +58,7 @@
       "ID": "probe/ping"
     },
     "multiValueParameters": {
-      "ID": [
-        "probe/ping"
-      ]
+      "ID": ["probe/ping"]
     },
     "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
   },
@@ -129,9 +127,7 @@
         "ID": "probe/ping"
       },
       "multiValueParameters": {
-        "ID": [
-          "probe/ping"
-        ]
+        "ID": ["probe/ping"]
       },
       "operationId": "2e690fa9c87631b02a771908de3b3712ac06ff20dd5e3709dc5bb528c019707a"
     }
