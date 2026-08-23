@@ -303,6 +303,9 @@ describe("invocation scope per-message extension", () => {
       cloudId: "a1b2c3d4000000000000",
       folderId: "e5f6a7b8000000000000",
     }),
+    // Scope-extension specs never touch the payload; the fixture only needs
+    // the member so the literal satisfies QueueMessage (issue #9).
+    payload: null,
   });
 
   it("publishes exactly one message at a time while keeping the delivery and context", async () => {

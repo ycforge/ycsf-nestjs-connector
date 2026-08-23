@@ -10,7 +10,8 @@ export type ConnectorErrorCode =
   | "UNKNOWN_INVOCATION_EVENT"
   | "INVALID_INVOCATION_EVENT"
   | "UNSUPPORTED_ROUTE_PATTERN"
-  | "NO_QUEUE_HANDLER";
+  | "NO_QUEUE_HANDLER"
+  | "QUEUE_BODY_DESERIALIZATION_FAILED";
 
 /**
  * Diagnostic detail attached to boundary errors. Values must never contain

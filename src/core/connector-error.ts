@@ -92,4 +92,24 @@ export class ConnectorError extends Error {
       "the Message Queue transport claimed the delivery but no @QueueHandler() method is registered in the application",
     );
   }
+
+  /**
+   * A queue message body could not be decoded under the connector's default
+   * JSON deserialization policy (issue #9). Raised when the application first
+   * reads {@link QueueMessage.payload}, so it surfaces inside exactly the
+   * handler round that consumes the body and propagates as an invocation
+   * failure — Message Queue retry/dead-letter configuration observes it
+   * (AGENTS.md section 8.2) while normalization of the rest of the delivery
+   * stays untouched.
+   *
+   * The underlying `JSON.parse` diagnostics are deliberately NOT embedded:
+   * `SyntaxError` messages can quote fragments of the body, which must never
+   * leak into boundary messages (AGENTS.md section 6.2).
+   */
+  static queueBodyDeserializationFailed(): ConnectorError {
+    return new ConnectorError(
+      { code: "QUEUE_BODY_DESERIALIZATION_FAILED", transportId: "message-queue" },
+      "the queue message body is not valid JSON under the default deserialization policy; decode it explicitly from QueueMessage.body or configure a custom queue body deserializer",
+    );
+  }
 }

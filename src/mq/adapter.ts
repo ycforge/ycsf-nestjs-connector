@@ -1,4 +1,5 @@
 import { extendInvocationScope } from "../context/invocation-scope";
+import type { QueueTransportOptions } from "../core/handler-options";
 import type { TransportAdapter, TransportId, TransportInvocation } from "../core/transport";
 import { dispatchQueueHandlers, discoverQueueHandlers } from "./dispatch";
 import type { QueueBatch } from "./message";
@@ -30,44 +31,65 @@ import { validateQueueEvent } from "./validate-raw-event";
  * so the single module-level instance is safe across warm and concurrent
  * invocations (AGENTS.md sections 10–11).
  */
-export const messageQueueTransport: TransportAdapter<RawQueueEvent, QueueBatch> = {
-  id: "message-queue" satisfies TransportId,
+/**
+ * Builds the Message Queue trigger transport with optional body
+ * deserialization configuration (issue #9). Configuration stays inside the
+ * transport boundary: nothing queue-specific leaks into the shared invocation
+ * record or into the HTTP transport (AGENTS.md section 30).
+ */
+export function createMessageQueueTransport(
+  options?: QueueTransportOptions,
+): TransportAdapter<RawQueueEvent, QueueBatch> {
+  return {
+    id: "message-queue" satisfies TransportId,
 
-  supports(rawEvent): rawEvent is RawQueueEvent {
-    if (typeof rawEvent !== "object" || rawEvent === null || Array.isArray(rawEvent)) {
-      return false;
-    }
-    const candidate = rawEvent as Record<string, unknown>;
-    const messages = candidate["messages"];
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return false;
-    }
-    return messages.every(isQueueMessageEnvelopeShape);
-  },
+    supports(rawEvent): rawEvent is RawQueueEvent {
+      if (typeof rawEvent !== "object" || rawEvent === null || Array.isArray(rawEvent)) {
+        return false;
+      }
+      const candidate = rawEvent as Record<string, unknown>;
+      const messages = candidate["messages"];
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return false;
+      }
+      return messages.every(isQueueMessageEnvelopeShape);
+    },
 
-  async invoke(invocation: TransportInvocation<RawQueueEvent>): Promise<QueueBatch> {
-    const rawEvent = validateQueueEvent(invocation.rawEvent);
-    const batch = normalizeQueueBatch(rawEvent);
+    async invoke(invocation: TransportInvocation<RawQueueEvent>): Promise<QueueBatch> {
+      const rawEvent = validateQueueEvent(invocation.rawEvent);
+      // Deserialization is deferred to payload access (see normalize-batch);
+      // normalization itself never interprets bodies.
+      const batch = normalizeQueueBatch(rawEvent, options?.deserializeBody);
 
-    // Publish the normalized delivery into this invocation's scope before any
-    // user code runs: queue code reached through the warm container can then
-    // read the typed batch plus the execution context injected by the core
-    // (@YandexContext()), isolated per invocation (AGENTS.md section 11).
-    // Handler dispatch (issue #8) runs INSIDE this same scope: discovery is a
-    // one-time static walk of the warm container, execution resolves handler
-    // instances per message under one shared DI sub-tree (so REQUEST/TRANSIENT
-    // lifecycles stay per delivery) and publishes each message as an immutable
-    // scope extension, and failures propagate verbatim — never converted to
-    // HTTP-like results — so Message Queue retry/dead-letter behavior stays
-    // effective. The untouched batch remains the deterministic transport
-    // result of a successful delivery.
-    return extendInvocationScope({ queueBatch: batch }, async () => {
-      const handlers = discoverQueueHandlers(invocation.container.getApplication());
-      await dispatchQueueHandlers(invocation.container, handlers, batch);
-      return batch;
-    });
-  },
-};
+      // Publish the normalized delivery into this invocation's scope before any
+      // user code runs: queue code reached through the warm container can then
+      // read the typed batch plus the execution context injected by the core
+      // (@YandexContext()), isolated per invocation (AGENTS.md section 11).
+      // Handler dispatch (issue #8) runs INSIDE this same scope: discovery is a
+      // one-time static walk of the warm container, execution resolves handler
+      // instances per message under one shared DI sub-tree (so REQUEST/TRANSIENT
+      // lifecycles stay per delivery) and publishes each message as an immutable
+      // scope extension, and failures propagate verbatim — never converted to
+      // HTTP-like results — so Message Queue retry/dead-letter behavior stays
+      // effective. The untouched batch remains the deterministic transport
+      // result of a successful delivery.
+      return extendInvocationScope({ queueBatch: batch }, async () => {
+        const handlers = discoverQueueHandlers(invocation.container.getApplication());
+        await dispatchQueueHandlers(invocation.container, handlers, batch);
+        return batch;
+      });
+    },
+  };
+}
+
+/**
+ * Default zero-configuration Message Queue transport (strict-JSON bodies).
+ * Module-level yet stateless — everything invocation-specific arrives on the
+ * {@link TransportInvocation}, so sharing one instance across warm and
+ * concurrent invocations stays safe.
+ */
+export const messageQueueTransport: TransportAdapter<RawQueueEvent, QueueBatch> =
+  createMessageQueueTransport();
 
 /** Cheap per-element fingerprint check; full validation lives in invoke(). */
 function isQueueMessageEnvelopeShape(element: unknown): boolean {
