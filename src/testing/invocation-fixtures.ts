@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { RawHttpApiGatewayV2Event } from "../http/raw-event";
 import type { RawQueueEvent } from "../mq/raw-event";
@@ -7,7 +7,7 @@ import type { RawQueueEvent } from "../mq/raw-event";
  * Test infrastructure (NOT part of the published package): loads the
  * sanitized conformance fixtures from `fixtures/` so specs can replay
  * invocations reconstructed from captured Yandex evidence through the public
- * connector API (issue #11).
+ * connector API (issues #11 and #12).
  *
  * These fixtures are NOT literal captures: credentials, identities,
  * addresses, identifiers and timestamps are synthetic placeholders. What is
@@ -57,14 +57,30 @@ export interface InvocationFixture<TEvent> {
 export type HttpInvocationFixture = InvocationFixture<RawHttpApiGatewayV2Event>;
 export type QueueInvocationFixture = InvocationFixture<RawQueueEvent>;
 
+/**
+ * Source overrides for the loader (issue #12). Everything is optional: the
+ * default remains the repository's committed `fixtures/` directory.
+ */
+export interface FixtureSourceOptions {
+  /**
+   * Replaces the fixtures root directory. Used by the replay tooling tests to
+   * point the loader at malformed fixture files without touching the
+   * repository-controlled conformance data.
+   */
+  readonly root?: string;
+}
+
 const FIXTURES_ROOT = path.join(__dirname, "..", "..", "fixtures");
+
+function fixturesRoot(options?: FixtureSourceOptions): string {
+  return options?.root ?? FIXTURES_ROOT;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function readDump(subdirectory: string, name: string): Promise<Record<string, unknown>> {
-  const filePath = path.join(FIXTURES_ROOT, subdirectory, `${name}.json`);
+async function readDumpFile(filePath: string): Promise<Record<string, unknown>> {
   const parsed: unknown = JSON.parse(await readFile(filePath, "utf8"));
   if (!isPlainObject(parsed)) {
     throw new Error(`Fixture ${filePath} must contain a single JSON object.`);
@@ -76,13 +92,16 @@ async function readDump(subdirectory: string, name: string): Promise<Record<stri
  * Shared load path: verifies the dump envelope and its provenance stamp
  * before narrowing. Fixtures are repository-controlled test data; full wire
  * validation stays the adapter's job under replay.
+ *
+ * `displayName` is what error messages quote — the fixture stem for
+ * name-based loads, the explicit path for file-based loads.
  */
-async function loadInvocationFixture<TEvent>(
-  subdirectory: string,
-  name: string,
+async function loadInvocationFixtureFile<TEvent>(
+  filePath: string,
+  displayName: string,
   describeTransportShape: (event: unknown) => void,
 ): Promise<InvocationFixture<TEvent>> {
-  const dump = await readDump(subdirectory, name);
+  const dump = await readDumpFile(filePath);
   const provenance: unknown = dump.provenance;
   if (
     !isPlainObject(provenance) ||
@@ -90,7 +109,7 @@ async function loadInvocationFixture<TEvent>(
     typeof provenance.evidence !== "string"
   ) {
     throw new Error(
-      `Fixture "${name}" must declare provenance { kind: "reconstructed", evidence: string }; ` +
+      `Fixture "${displayName}" must declare provenance { kind: "reconstructed", evidence: string }; ` +
         "fixtures document reconstructed behavior, not literal captures.",
     );
   }
@@ -101,17 +120,54 @@ async function loadInvocationFixture<TEvent>(
   return dump as unknown as InvocationFixture<TEvent>;
 }
 
+async function loadInvocationFixture<TEvent>(
+  subdirectory: string,
+  name: string,
+  describeTransportShape: (event: unknown) => void,
+  options?: FixtureSourceOptions,
+): Promise<InvocationFixture<TEvent>> {
+  return loadInvocationFixtureFile<TEvent>(
+    path.join(fixturesRoot(options), subdirectory, `${name}.json`),
+    name,
+    describeTransportShape,
+  );
+}
+
 /**
  * Loads one HTTP/API Gateway v2 fixture by fixture name (file stem). The
  * `event.version === "2.0"` transport discriminator is verified here;
  * everything else is validated by the adapter under replay.
  */
-export async function loadHttpFixture(name: string): Promise<HttpInvocationFixture> {
-  return loadInvocationFixture<RawHttpApiGatewayV2Event>("http", name, (event) => {
-    if (!isPlainObject(event) || event.version !== "2.0") {
-      throw new Error(`HTTP fixture "${name}" does not carry event.version "2.0".`);
-    }
-  });
+export async function loadHttpFixture(
+  name: string,
+  options?: FixtureSourceOptions,
+): Promise<HttpInvocationFixture> {
+  return loadInvocationFixture<RawHttpApiGatewayV2Event>(
+    "http",
+    name,
+    (event) => {
+      if (!isPlainObject(event) || event.version !== "2.0") {
+        throw new Error(`HTTP fixture "${name}" does not carry event.version "2.0".`);
+      }
+    },
+    options,
+  );
+}
+
+/**
+ * Loads one HTTP/API Gateway v2 fixture from an explicit JSON file path.
+ * Same envelope/provenance/discriminator validation as {@link loadHttpFixture}.
+ */
+export async function loadHttpFixtureFile(filePath: string): Promise<HttpInvocationFixture> {
+  return loadInvocationFixtureFile<RawHttpApiGatewayV2Event>(
+    path.resolve(filePath),
+    filePath,
+    (event) => {
+      if (!isPlainObject(event) || event.version !== "2.0") {
+        throw new Error(`HTTP fixture "${filePath}" does not carry event.version "2.0".`);
+      }
+    },
+  );
 }
 
 /**
@@ -119,10 +175,58 @@ export async function loadHttpFixture(name: string): Promise<HttpInvocationFixtu
  * `messages` array is verified because it is the queue transport's detection
  * discriminator; everything else is validated by the adapter under replay.
  */
-export async function loadQueueFixture(name: string): Promise<QueueInvocationFixture> {
-  return loadInvocationFixture<RawQueueEvent>("mq", name, (event) => {
+export async function loadQueueFixture(
+  name: string,
+  options?: FixtureSourceOptions,
+): Promise<QueueInvocationFixture> {
+  return loadInvocationFixture<RawQueueEvent>(
+    "mq",
+    name,
+    (event) => {
+      if (!isPlainObject(event) || !Array.isArray(event.messages)) {
+        throw new Error(`Queue fixture "${name}" does not contain an event.messages array.`);
+      }
+    },
+    options,
+  );
+}
+
+/**
+ * Loads one Message Queue trigger fixture from an explicit JSON file path.
+ * Same envelope/provenance/discriminator validation as {@link loadQueueFixture}.
+ */
+export async function loadQueueFixtureFile(filePath: string): Promise<QueueInvocationFixture> {
+  return loadInvocationFixtureFile<RawQueueEvent>(path.resolve(filePath), filePath, (event) => {
     if (!isPlainObject(event) || !Array.isArray(event.messages)) {
-      throw new Error(`Queue fixture "${name}" does not contain an event.messages array.`);
+      throw new Error(`Queue fixture "${filePath}" does not contain an event.messages array.`);
     }
   });
+}
+
+/**
+ * Lists the committed HTTP fixture names (file stems, sorted). Used by the
+ * replay tooling to enumerate whole directories instead of hard-coded lists.
+ */
+export async function listHttpFixtureNames(options?: FixtureSourceOptions): Promise<string[]> {
+  return listFixtureNames("http", options);
+}
+
+/**
+ * Lists the committed Message Queue fixture names (file stems, sorted).
+ * Used by the replay tooling to enumerate whole directories instead of
+ * hard-coded lists.
+ */
+export async function listQueueFixtureNames(options?: FixtureSourceOptions): Promise<string[]> {
+  return listFixtureNames("mq", options);
+}
+
+async function listFixtureNames(
+  subdirectory: string,
+  options?: FixtureSourceOptions,
+): Promise<string[]> {
+  const entries = await readdir(path.join(fixturesRoot(options), subdirectory));
+  return entries
+    .filter((entry) => entry.endsWith(".json"))
+    .map((entry) => entry.slice(0, -".json".length))
+    .sort();
 }

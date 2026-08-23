@@ -4,7 +4,9 @@ Sanitized conformance fixtures **reconstructed from captured evidence** of real
 Yandex Cloud Functions traffic, used by the conformance test suites in
 `src/http/conformance-fixtures.spec.ts` and `src/mq/conformance-fixtures.spec.ts`
 to replay them through `createYandexHandler()` without any Yandex Cloud
-connectivity (issue #11).
+connectivity (issue #11). The same fixtures can be replayed locally from the
+command line with `npm run replay` (issue #12, see
+[`../docs/REPLAY.md`](../docs/REPLAY.md)).
 
 These files are **not literal captures**. Each fixture reproduces the observed
 structure of one recorded invocation scenario; sensitive, identifying and

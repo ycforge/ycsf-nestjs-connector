@@ -63,32 +63,35 @@ Visibility tiers:
   only the `"."` subpath, so deep imports of `dist/**` are blocked by the
   package resolver; internal modules may change at any time.
 
-| Module                                          | Visibility | Responsibility                                                                               |
-| ----------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
-| `src/core/transport.ts`                         | Public     | Transport SPI: adapter contract, handler type, container ref                                 |
-| `src/core/raw-access.ts`                        | Public     | `HasRaw` mixin contract for lossless raw access                                              |
-| `src/core/errors.ts`                            | Public     | Error taxonomy codes for unknown/invalid invocations                                         |
-| `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)                                       |
-| `src/core/handler-options.ts`                   | Public     | `createYandexHandler` options incl. queue deserializer (#9)                                  |
-| `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)                                     |
-| `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)                                        |
-| `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point                                        |
-| `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                                                |
-| `src/http/normalized-request.ts`                | Public     | Normalized HTTP request contract                                                             |
-| `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                                                  |
-| `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)                                         |
-| `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts + body strategy (#9)                                |
-| `src/mq/queue-handler.decorator.ts`             | Public     | `@QueueHandler()` method registration (#8)                                                   |
-| `src/mq/queue-message.decorator.ts`             | Public     | `@QueueMessage()` registration + merged message type (#8)                                    |
-| `src/mq/dispatch.ts`                            | Internal   | Queue handler discovery + per-message fan-out dispatch (#8)                                  |
-| `src/mq/body-deserialization.ts`                | Internal   | Default strict-JSON policy + memoized payload reader (#9)                                    |
-| `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                                                  |
-| `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)                                            |
-| `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                                                  |
-| `src/context/yandex-context.decorator.ts`       | Public     | `@YandexContext()` implementation (#4)                                                       |
-| `src/decorators/decorator-contracts.ts`         | Public     | Signatures of the three decorators                                                           |
-| `src/http/*`, `src/mq/*` adapters               | Internal   | Behavior implementing the above contracts (#5–#8)                                            |
-| `src/testing/invocation-fixtures.ts`            | Internal   | Test-only loader for the `fixtures/` conformance reconstructions (#11); excluded from `dist` |
+| Module                                          | Visibility | Responsibility                                                                                                                    |
+| ----------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `src/core/transport.ts`                         | Public     | Transport SPI: adapter contract, handler type, container ref                                                                      |
+| `src/core/raw-access.ts`                        | Public     | `HasRaw` mixin contract for lossless raw access                                                                                   |
+| `src/core/errors.ts`                            | Public     | Error taxonomy codes for unknown/invalid invocations                                                                              |
+| `src/core/create-yandex-handler.ts`             | Public     | Runtime entry point: bootstrap, caching, dispatch (#3)                                                                            |
+| `src/core/handler-options.ts`                   | Public     | `createYandexHandler` options incl. queue deserializer (#9)                                                                       |
+| `src/core/connector-error.ts`                   | Public     | Concrete boundary error carrying the taxonomy codes (#3)                                                                          |
+| `src/core/detect-transport.ts`                  | Internal   | Detection loop over the ordered adapter registry (#3)                                                                             |
+| `src/core/transports.ts`                        | Internal   | Ordered built-in adapter registry; registration point                                                                             |
+| `src/http/raw-event.ts`                         | Public     | Raw API Gateway v2 event shape (**observed**)                                                                                     |
+| `src/http/normalized-request.ts`                | Public     | Normalized HTTP request contract                                                                                                  |
+| `src/http/response.ts`                          | Public     | Function response envelope (**documented**)                                                                                       |
+| `src/mq/raw-event.ts`                           | Public     | Raw Message Queue trigger event shape (**observed**)                                                                              |
+| `src/mq/message.ts`                             | Public     | Normalized queue message/batch contracts + body strategy (#9)                                                                     |
+| `src/mq/queue-handler.decorator.ts`             | Public     | `@QueueHandler()` method registration (#8)                                                                                        |
+| `src/mq/queue-message.decorator.ts`             | Public     | `@QueueMessage()` registration + merged message type (#8)                                                                         |
+| `src/mq/dispatch.ts`                            | Internal   | Queue handler discovery + per-message fan-out dispatch (#8)                                                                       |
+| `src/mq/body-deserialization.ts`                | Internal   | Default strict-JSON policy + memoized payload reader (#9)                                                                         |
+| `src/context/yandex-execution-context.ts`       | Public     | Normalized execution context (**observed**)                                                                                       |
+| `src/context/build-yandex-execution-context.ts` | Internal   | Builds the normalized context per invocation (#4)                                                                                 |
+| `src/context/invocation-scope.ts`               | Internal   | AsyncLocalStorage invocation isolation (#4)                                                                                       |
+| `src/context/yandex-context.decorator.ts`       | Public     | `@YandexContext()` implementation (#4)                                                                                            |
+| `src/decorators/decorator-contracts.ts`         | Public     | Signatures of the three decorators                                                                                                |
+| `src/http/*`, `src/mq/*` adapters               | Internal   | Behavior implementing the above contracts (#5–#8)                                                                                 |
+| `src/testing/invocation-fixtures.ts`            | Internal   | Test-only loader for the `fixtures/` conformance reconstructions (#11); excluded from `dist`                                      |
+| `src/testing/replay.ts`                         | Internal   | Local replay helper: warm session + one-shot replays through the public `createYandexHandler()` (#12); excluded from `dist`       |
+| `src/testing/replay-app.ts`                     | Internal   | Value-free probe application used as the default `--module` target for local replays (#12); excluded from `dist`                  |
+| `src/testing/replay-cli.ts`                     | Internal   | `npm run replay` CLI: fixture selection, per-fixture outcomes, exit codes (#12); compiled by `tsconfig.tools.json`, not published |
 
 Rules:
 
@@ -636,4 +639,5 @@ this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
 | Body deserialization, attributes       | §4, §5.1, §6.2, §7         | #9             |
 | Unified failure semantics              | §6, §6.3, §6.4, §6.5       | #10            |
 | Replayable conformance fixtures        | fixtures/, §2 (test infra) | #11            |
+| Local invocation/replay tooling        | §2 (test infra)            | #12            |
 | Redaction/security utilities           | §6.5                       | #13            |
