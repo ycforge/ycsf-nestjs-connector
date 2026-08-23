@@ -20,10 +20,12 @@ independent of Yandex Cloud whenever practical.
 > injection with issue #4, the Yandex API Gateway v2 HTTP request adapter
 > (detection, validation, normalization) with issue #5, HTTP response/error
 > mapping plus controller dispatch with issue #6, the Message Queue event
-> adapter (detection, validation, batch normalization) with issue #7, and
-> queue handler dispatch with `@QueueHandler()`/`@QueueMessage()` injection
-> with issue #8. Observed Yandex Cloud runtime constraints that all connector
-> code must respect are catalogued in [AGENTS.md](./AGENTS.md).
+> adapter (detection, validation, batch normalization) with issue #7, queue
+> handler dispatch with `@QueueHandler()`/`@QueueMessage()` injection
+> with issue #8, typed queue body payloads with issue #9, and unified
+> invocation failure semantics with issue #10. Observed Yandex Cloud runtime
+> constraints that all connector code must respect are catalogued in
+> [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -183,6 +185,52 @@ the original `string_value` exactly, Number-typed values keep their precise
 string form (conversion is your deliberate step), unknown future data types
 flow through unchanged, and `md5OfMessageAttributes` passes through
 verbatim.
+
+## Failure semantics
+
+Every invocation ends in a transport-shaped success or a transport-shaped
+failure. Failures fall into three explicit classes (full contract:
+[ARCHITECTURE.md §6](./docs/ARCHITECTURE.md#6-error-semantics)):
+
+1. **Transport / invocation validation.** Events no transport claims reject
+   with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT` before any
+   initialization effort; claimed-but-malformed events reject with
+   `INVALID_INVOCATION_EVENT` before any application code runs.
+   `error instanceof ConnectorError` identifies an expected boundary error;
+   branch on its stable `code`, never on messages.
+2. **Message Queue payload deserialization.** A body that is not valid JSON
+   fails the consuming handler round with `QUEUE_BODY_DESERIALIZATION_FAILED`
+   (raw `body` and `raw` stay available); custom deserializer failures
+   propagate verbatim. Both fail the whole invocation under the same fail-fast
+   contract as handler errors.
+3. **Application handler failures** — never wrapped, never converted:
+   - **HTTP**: exceptions map through NestJS's own machinery — `HttpException`
+     responses keep their exact status code and body, exception filters and
+     interceptors stay in charge, and an unexpected failure becomes one static
+     opaque envelope (`{"statusCode":500,"message":"Internal server error"}`)
+     with no stack frames, exception text or echoed request values. A failing
+     invocation never affects the next warm invocation.
+   - **Message Queue**: failures propagate out of the function invocation —
+     deliberately, so Yandex Message Queue retry/dead-letter configuration can
+     operate; the connector never acknowledges a failed delivery by returning a
+     successful result. Batches run sequentially and fail fast: messages after
+     the first failure are not attempted, earlier successes are not replayed
+     inside the same invocation, and a successful delivery resolves to the
+     normalized batch — never an HTTP-style envelope. Manual acknowledgement,
+     deletion, retry counters and DLQ management are intentionally absent;
+     Yandex Message Queue owns those mechanics.
+
+**Bootstrap failures:** if Nest initialization fails, the invocation rejects
+with the original error (never a falsely successful response), every
+concurrent caller of that cold start observes the same failure, the next
+invocation retries initialization from scratch (failed cold starts are never
+cached), and `handler.close()` stays idempotent.
+
+**Diagnostic redaction:** connector diagnostics are value-free — field names,
+expected types, transport ids and route patterns only. Deserialization errors
+drop `JSON.parse` details because they can quote body fragments; automatic
+serialization of the execution context replaces the IAM token with
+`REDACTED_TOKEN` and excludes raw payloads; the connector itself logs nothing.
 
 ## Architecture
 
