@@ -33,13 +33,15 @@ const FORBIDDEN_NAME_PATTERN = /(^|\/)([^/]*\bspec\b|\btest[^/]*|\.env[^/]*|auth
 
 // Mirrors src/index.spec.ts: the runtime surface grows only deliberately
 // (docs/ARCHITECTURE.md section 7); issue #3 added the bootstrap, issue #4
-// the context decorator, issue #8 the queue decorators.
+// the context decorator, issue #8 the queue decorators, issue #13 the
+// safe-diagnostics serializer.
 const EXPECTED_RUNTIME_EXPORTS = [
   "ConnectorError",
   "QueueHandler",
   "QueueMessage",
   "YandexContext",
   "createYandexHandler",
+  "safeDiagnostics",
 ];
 const FORBIDDEN_DEEP_IMPORTS = [
   "@ycforge/ycsf-nestjs-connector/dist/core/transport",
@@ -167,6 +169,22 @@ if (typeof entry.QueueMessage !== "function") {
   console.error("QueueMessage must be a decorator factory function");
   process.exit(1);
 }
+if (typeof entry.safeDiagnostics !== "function") {
+  console.error("safeDiagnostics must be a function");
+  process.exit(1);
+}
+const redactedProbe = entry.safeDiagnostics({
+  token: "sentinel-iam-secret-value",
+  headers: { Authorization: "Bearer sentinel-auth-value", Cookie: "session=sentinel-cookie" },
+});
+const redactedJson = JSON.stringify(redactedProbe);
+if (
+  redactedJson !==
+  '{"token":"REDACTED_TOKEN","headers":{"Authorization":"REDACTED_AUTHORIZATION","Cookie":"REDACTED_COOKIE"}}'
+) {
+  console.error("safeDiagnostics did not produce the documented redacted shape:", redactedJson);
+  process.exit(1);
+}
 const probeHandler = entry.createYandexHandler(class AppModule {});
 if (typeof probeHandler !== "function" || typeof probeHandler.close !== "function") {
   console.error("createYandexHandler must return an invocable handler with close()");
@@ -211,7 +229,7 @@ function runPositiveTypeCheck(consumerDir) {
   writeFileSync(
     path.join(consumerDir, "consumer-positive.ts"),
     [
-      'import { ConnectorError, createYandexHandler, QueueHandler, QueueMessage, YandexContext } from "@ycforge/ycsf-nestjs-connector";',
+      'import { ConnectorError, createYandexHandler, QueueHandler, QueueMessage, safeDiagnostics, YandexContext } from "@ycforge/ycsf-nestjs-connector";',
       "import type {",
       "  ConnectorErrorCode,",
       "  ClosableYandexCloudFunctionHandler,",
@@ -314,6 +332,13 @@ function runPositiveTypeCheck(consumerDir) {
       "export const handlerClose: Promise<void> = yandexHandler.close();",
       'export const boundaryError = ConnectorError.invalidInvocationEvent("http", "missing body");',
       "export const boundaryErrorCode: ConnectorErrorCode = boundaryError.code;",
+      "",
+      "// Issue #13 surface: the redacting diagnostic serializer ships through",
+      "// the packaged declarations and accepts arbitrary diagnostic values.",
+      "export const redacted: unknown = safeDiagnostics({",
+      "  token: boundaryErrorCode,",
+      '  headers: { Authorization: "Bearer x", "X-Request-Id": "keep" },',
+      "});",
       "",
     ].join("\n"),
   );

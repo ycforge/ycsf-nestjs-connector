@@ -26,9 +26,10 @@ independent of Yandex Cloud whenever practical.
 > invocation failure semantics with issue #10. A replayable conformance suite
 > built from sanitized fixtures reconstructed from captured Yandex invocations
 > (HTTP and Message Queue) guards the observed runtime contract end to end
-> (issue #11, [fixtures/](./fixtures)). Observed Yandex Cloud runtime
-> constraints that all connector code must respect are catalogued in
-> [AGENTS.md](./AGENTS.md).
+> (issue #11, [fixtures/](./fixtures)), and an explicit redaction policy for
+> diagnostic serialization ships as `safeDiagnostics` (issue #13). Observed
+> Yandex Cloud runtime constraints that all connector code must respect are
+> catalogued in [AGENTS.md](./AGENTS.md).
 
 ## Usage
 
@@ -70,6 +71,47 @@ The context is scoped to a single invocation and never shared between them.
 Its IAM token (`executionContext.token`) is a secret: automatic serialization
 (`JSON.stringify`) redacts it to `REDACTED_TOKEN` and excludes the raw
 payloads, so accidental logging cannot leak credentials.
+
+### Safe diagnostics vs raw access
+
+Raw escape hatches (`raw`, `rawEvent`, direct property access) are exact,
+intentionally unsafe references — they carry the IAM token, client credentials
+and unredacted personal data, and the connector never logs them. When you need
+to log or snapshot invocation data yourself, route it through `safeDiagnostics`
+instead of serializing raw structures directly:
+
+```ts
+import { safeDiagnostics } from "@ycforge/ycsf-nestjs-connector";
+
+console.log(JSON.stringify(safeDiagnostics({ message: "handled", ctx: context })));
+```
+
+`safeDiagnostics(value)` returns a redacted, JSON-safe copy (input is never
+mutated):
+
+- `token` is replaced with `REDACTED_TOKEN` on the serialized root and on any
+  nested value shaped like the runtime context; ordinary application fields
+  named `token` elsewhere pass through untouched.
+- Header maps lose credentials and client IPs: `Authorization`, `Cookie`,
+  `X-Forwarded-For`, `X-Envoy-External-Address`, `X-Real-Remote-Address`
+  become placeholders, while correlation ids (`X-Request-Id`, trace ids) stay
+  verbatim for observability. `sourceIp` is redacted at any depth. Entries in
+  gateway parameter maps named like cookies/authorization are placeholdered as
+  well (the gateway duplicates declared cookies there).
+- Queue payloads stay out: normalized queue messages serialize to identity,
+  checksums, metadata and attribute names — never bodies, deserialized
+  payloads or attribute values; raw API Gateway v2 events and raw MQ wire
+  messages drop their `body`.
+- Errors collapse to `{ name }` (plus `code`/`transportId` for
+  `ConnectorError`): messages, stacks and cause chains may quote request data
+  and are omitted.
+- Getters are never evaluated (lazy payloads such as `QueueMessage.payload`
+  are neither computed nor leaked), cycles terminate deterministically, and
+  output is stable under `JSON.stringify`.
+
+This is a diagnostics aid, not a security framework: your own error messages
+and business data remain your responsibility, and `rawQueryString` is passed
+through unparsed by design.
 
 The built-in registry currently ships with the HTTP / API Gateway v2 transport
 (#5, #6): `version: "2.0"` events are detected, structurally validated,

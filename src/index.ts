@@ -17,6 +17,7 @@ export { createYandexHandler } from "./core/create-yandex-handler";
 export type { ClosableYandexCloudFunctionHandler } from "./core/create-yandex-handler";
 export type { CreateYandexHandlerOptions, QueueTransportOptions } from "./core/handler-options";
 export { ConnectorError } from "./core/connector-error";
+export { safeDiagnostics } from "./core/safe-diagnostics";
 
 // Core: transport SPI and shared invocation contracts.
 export type {

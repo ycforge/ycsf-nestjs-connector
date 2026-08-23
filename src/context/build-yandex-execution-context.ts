@@ -1,11 +1,5 @@
 import type { YandexExecutionContext } from "./yandex-execution-context";
-
-/**
- * Placeholder substituted for the service account IAM token by
- * {@link YandexExecutionContext.toJSON}; matches the redaction convention of
- * AGENTS.md section 6.3.
- */
-const REDACTED_TOKEN = "REDACTED_TOKEN";
+import { REDACTED_TOKEN } from "../core/safe-diagnostics";
 
 /**
  * Builds the normalized {@link YandexExecutionContext} from one invocation's
@@ -51,6 +45,8 @@ export function buildYandexExecutionContext(
       // Optional fields appear only when present on the runtime context: a
       // redaction placeholder must never imply a token that does not exist,
       // and absent fields stay absent rather than becoming null/undefined.
+      // The placeholder comes from the shared redaction policy module (issue
+      // #13) so context serialization and safeDiagnostics() can never drift.
       const serialized: Record<string, unknown> = {
         awsRequestId: executionContext.awsRequestId,
         functionName: executionContext.functionName,

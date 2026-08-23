@@ -5,6 +5,7 @@ import {
 } from "../context/invocation-scope";
 import type { YandexExecutionContext } from "../context/yandex-execution-context";
 import { createYandexHandler } from "../core/create-yandex-handler";
+import { safeDiagnostics } from "../core/safe-diagnostics";
 import { loadHttpFixture, type HttpInvocationFixture } from "../testing/invocation-fixtures";
 import type { NormalizedHttpRequest } from "./normalized-request";
 
@@ -331,5 +332,38 @@ describe("HTTP conformance fixtures (issue #11)", () => {
     results.forEach((result, index) => {
       expect(result.captured.executionContext.awsRequestId).toBe(requestIds[index]);
     });
+  });
+
+  it("produces safe diagnostics of the raw fixture data without credential or IP leakage", async () => {
+    // Issue #13: the sanitized sentinels standing in for credentials, cookies
+    // and client IPs (AGENTS.md section 6.3) must never survive the
+    // redacting serializer — while correlation identifiers stay verbatim.
+    const { captured, fixture } = await replay("custom-headers-and-cookies");
+    const event = fixture.event;
+
+    const serializedJson = JSON.stringify(
+      safeDiagnostics({
+        normalizedRequest: captured.normalizedRequest,
+        executionContext: captured.executionContext,
+        event,
+      }),
+    );
+
+    // Full sanitized header values must not survive (their trailing
+    // placeholder substrings legitimately equal our own markers).
+    expect(serializedJson).not.toContain(String(event.headers.Authorization));
+    expect(serializedJson).not.toContain(String(event.headers.Cookie));
+    expect(serializedJson).not.toContain("203.0.113.");
+    // Gateway-declared parameters duplicate the cookie under its declared
+    // name (DATA-ANALYSE.md anomaly 10): that channel is sanitized too.
+    expect(serializedJson).not.toContain("cookie-value");
+    // Correlation identifiers are deliberately kept (policy decision #13).
+    expect(serializedJson).toContain(String(event.headers["X-Request-Id"]));
+
+    // Serializing the runtime context AS THE ROOT value engages the IAM
+    // token guard even for a context whose every other field passes through.
+    const contextJson = JSON.stringify(safeDiagnostics(fixture.context));
+    expect(contextJson).toContain('"token":"REDACTED_TOKEN"');
+    expect(contextJson).not.toContain(String(event.headers.Authorization));
   });
 });
