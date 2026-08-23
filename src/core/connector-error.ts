@@ -8,6 +8,12 @@ import type { TransportId } from "./transport";
  * applications can branch on codes instead of messages (AGENTS.md section 8).
  * Messages are composed from structural diagnostics only — never from payload
  * values such as headers, tokens or bodies (AGENTS.md section 6.2).
+ *
+ * This class is the boundary-vs-application discriminator of the unified
+ * failure semantics (issue #10): every `ConnectorError` is an expected
+ * transport/validation/deserialization boundary failure, while application
+ * handler failures propagate as their original errors — wrapped nowhere,
+ * converted to no other shape (docs/ARCHITECTURE.md section 6).
  */
 export class ConnectorError extends Error {
   private constructor(

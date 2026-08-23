@@ -381,7 +381,21 @@ verbatim alongside everything else.
 ## 6. Error semantics
 
 Error handling differs by transport because the transports differ in sync vs
-async semantics.
+async semantics. What is **unified** (issue #10) is the failure taxonomy:
+every invocation ends in exactly one of two outcomes — a transport-shaped
+success or a transport-shaped failure — and every failure belongs to exactly
+one of three failure classes:
+
+| Failure class                            | Raised by                                                                       | Representation                                                                                                                                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Transport / invocation validation     | Detection or structural validation of the raw event/context; route registration | `ConnectorError` codes `UNKNOWN_INVOCATION_EVENT`, `INVALID_INVOCATION_EVENT`, `UNSUPPORTED_ROUTE_PATTERN`                                                                                              |
+| 2. Message Queue payload deserialization | Reading `QueueMessage.payload` under the configured body strategy               | Default policy: `ConnectorError` code `QUEUE_BODY_DESERIALIZATION_FAILED`; custom strategies propagate their own errors verbatim into the consuming handler round                                       |
+| 3. Application handler failure           | User code: controllers, guards, services, pipes, queue handlers                 | Never a `ConnectorError`, never wrapped, never converted: HTTP maps it through the NestJS exception machinery onto a deterministic response, Message Queue propagates it verbatim out of the invocation |
+
+**Boundary rule:** `error instanceof ConnectorError` identifies an expected
+boundary failure raised by this package itself. Any other error escaping an
+invocation originates in application code and reaches the boundary untouched.
+Applications branch on the stable `code` values, never on messages.
 
 ### 6.1 Synchronous HTTP
 
@@ -389,6 +403,17 @@ async semantics.
   territory: every route is an opaque framework proxy, so normal exception
   filters and `HttpException` mapping produce the HTTP response unchanged.
   The connector does not swallow or wrap them.
+- **Failure class 3 mapping (issue #10):** a thrown `HttpException` — including
+  custom subclasses and object response bodies with arbitrary status codes —
+  becomes exactly the response the application defined: status code, body
+  shape and headers travel untouched. An unexpected (non-`HttpException`)
+  failure maps through the framework filters to one static, value-free
+  envelope (`statusCode` `500`, `"Internal server error"`): neither the error
+  message nor stack frames nor any request value reaches the client
+  (AGENTS.md §8.1). Global and route-scoped exception filters remain in
+  charge and may replace both mappings; interceptors observe handler failures
+  first and may remap them before exception mapping applies. The connector
+  installs no parallel error framework.
 - Failures escaping every registered layer fall back to a deterministic,
   opaque internal-server-error envelope (`statusCode` `500`,
   `"Internal server error"`) mirroring the platform default; neither the error
@@ -424,46 +449,119 @@ async semantics.
   `bodyParser` errors do. Serialization failures of handler payloads (e.g.
   circular structures) surface inside the route proxy and map through the
   framework filters to the same opaque 500.
+- **Failure classes 1 and bootstrap never produce a response envelope**
+  (issue #10): unknown events (`UNKNOWN_INVOCATION_EVENT`) fail before any
+  initialization effort, claimed-but-malformed events
+  (`INVALID_INVOCATION_EVENT`) fail before any application code runs, and a
+  failed cold start rejects the invocation with the original bootstrap error
+  (section 6.4). A rejected invocation therefore never masquerades as a
+  `200`/`4xx`/`5xx` response toward the gateway.
+- An HTTP exception in one invocation cannot affect the next warm invocation:
+  request/response state is created per dispatch, so failures leave no residue
+  and later invocations observe their own deterministic outcomes
+  (AGENTS.md §11).
 
 ### 6.2 Asynchronous Message Queue
 
 - Any failure inside a queue handler propagates out of the invocation. The
   connector never catches-and-forgets (AGENTS.md §8.2): a failed message must
   surface as a failed invocation so Message Queue retry / dead-letter
-  configuration remains effective. Acknowledgement/retry policy knobs are
-  introduced by issue #10 if ever needed.
+  configuration remains effective. This propagation is the whole
+  acknowledgement contract by design: Yandex Message Queue owns message
+  deletion, retry counters and dead-lettering, and the failed invocation is
+  exactly the signal its configuration consumes. The connector deliberately
+  implements no manual acknowledgement, deletion, retry-counter or DLQ
+  management APIs.
 - Batch iteration is fail-fast and sequential: the first handler failure
   rejects the whole invocation immediately, and messages after the failing one
   are never attempted — the domain model stays batch-capable regardless of the
   current grouped-message limit of `1` (**observed**, AGENTS.md §4.6), but no
   acknowledgement policy is implied beyond "the invocation failed".
+- Earlier successful messages are never replayed inside the same invocation
+  after a later failure: every round runs exactly once per delivery, in order.
+  Redelivery of already-processed messages after a failed invocation is
+  Yandex Message Queue's decision under its configured retry policy — at-least-
+  once semantics belong to the platform, not to this connector; consumers that
+  cannot tolerate reprocessing must deduplicate themselves.
 - A claimed delivery with no registered `@QueueHandler()` fails with
   `NO_QUEUE_HANDLER` instead of succeeding silently: nobody consumed the
   message, so retry/dead-letter configuration must observe it (AGENTS.md
   §8.3).
-- A body that cannot be decoded under the default JSON policy fails the
-  consuming handler round with `QUEUE_BODY_DESERIALIZATION_FAILED`
-  (issue #9, §5.1); custom deserializer failures propagate verbatim. Both are
-  ordinary invocation failures — retry/dead-letter configuration observes
-  them.
+- **Payload deserialization is its own failure class** (issues #9/#10): a body
+  that cannot be decoded under the default JSON policy fails the consuming
+  handler round with `ConnectorError` code `QUEUE_BODY_DESERIALIZATION_FAILED`
+  (§5.1); custom deserializer failures propagate verbatim into the consuming
+  round. Both fail the whole invocation under the same fail-fast contract as
+  handler failures — they are never converted to results, envelopes or
+  skips. The untouched `body` and raw message stay available throughout, so
+  applications can log or quarantine undecodable deliveries from their own
+  code without the connector guessing a policy for them.
+- Successful processing resolves to the normalized `QueueBatch` itself —
+  never an HTTP-style envelope. There is no `{ statusCode, body }` shape on
+  any queue transport result.
 
 ### 6.3 Boundary errors
 
-Five error codes are reserved at the runtime boundary (`src/core/errors.ts`):
+Five error codes are reserved at the runtime boundary (`src/core/errors.ts`),
+each belonging to exactly one of the three failure classes of section 6:
 
-| Code                                | Meaning                                                                                        |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `UNKNOWN_INVOCATION_EVENT`          | No transport claimed the event (diagnostic, non-secret detail)                                 |
-| `INVALID_INVOCATION_EVENT`          | A claiming transport failed deeper structural validation                                       |
-| `UNSUPPORTED_ROUTE_PATTERN`         | A route outside the documented matching subset was registered (#5)                             |
-| `NO_QUEUE_HANDLER`                  | The Message Queue transport claimed a delivery but no `@QueueHandler()` exists (#8)            |
-| `QUEUE_BODY_DESERIALIZATION_FAILED` | Default strict-JSON policy could not decode a consumed queue body; value-free diagnostics (#9) |
+| Code                                | Failure class                           | Meaning                                                                                        |
+| ----------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `UNKNOWN_INVOCATION_EVENT`          | 1 — invocation validation               | No transport claimed the event (diagnostic, non-secret detail)                                 |
+| `INVALID_INVOCATION_EVENT`          | 1 — invocation validation               | A claiming transport failed deeper structural validation                                       |
+| `UNSUPPORTED_ROUTE_PATTERN`         | 1 — invocation validation               | A route outside the documented matching subset was registered (#5); fails cold start           |
+| `NO_QUEUE_HANDLER`                  | 1 — delivery-consumer wiring validation | The Message Queue transport claimed a delivery but no `@QueueHandler()` exists (#8)            |
+| `QUEUE_BODY_DESERIALIZATION_FAILED` | 2 — payload deserialization             | Default strict-JSON policy could not decode a consumed queue body; value-free diagnostics (#9) |
 
-Concrete error classes: `ConnectorError` (issue #3) implements both codes and
-is thrown at the detection boundary; transports raise
-`INVALID_INVOCATION_EVENT` from their own validation. Redaction utilities for
-diagnostics land with issue #13; error messages carry structural information
-only (field names, never payload values).
+Concrete error class: `ConnectorError` (issue #3) carries these codes and is
+thrown at the detection/validation boundaries; transports raise
+`INVALID_INVOCATION_EVENT` from their own validation. Failure class 3
+(application handler errors) intentionally has **no** code and **no**
+representation in this taxonomy: those errors are not connector boundary
+failures and must reach their transport's failure semantics unchanged.
+
+### 6.4 Bootstrap and runtime lifecycle failures
+
+- If Nest initialization fails on cold start, every concurrent caller of the
+  failing attempt receives the original error verbatim — it is not wrapped,
+  not converted into an HTTP envelope, and not turned into a
+  `ConnectorError`: the failure belongs to the application's module graph or
+  the platform, and preserving the original type keeps it debuggable.
+- A failed cold start is never cached as permanent state: the shared
+  initialization promise is cleared on rejection, so the next invocation
+  retries initialization from scratch (AGENTS.md §10). No module-level
+  mutable error state exists.
+- Because bootstrap strictly precedes detection-independent work and all
+  transport dispatch, a failed initialization can never yield any transport
+  result — in particular never a falsely successful HTTP envelope.
+- `close()` stays idempotent, performs nothing before the first invocation,
+  awaits an in-flight initialization before releasing it, and lets the next
+  invocation cold-start fresh (§3.4).
+
+### 6.5 Diagnostic redaction rules
+
+The connector's own diagnostics are value-free by construction (AGENTS.md
+§6.2):
+
+- `ConnectorError` messages and details carry field names, expected types,
+  transport ids and route patterns only — never body fragments, header values,
+  tokens, cookies, client IPs, or arbitrary exception message text.
+- The default strict-JSON deserialization policy drops the underlying
+  `SyntaxError` entirely, because `JSON.parse` messages can quote body
+  fragments; custom deserializer errors propagate unwrapped because wrapping
+  would duplicate their content while the strategy owner is responsible for
+  what their own errors expose.
+- The normalized execution context serializes redacted: automatic
+  `JSON.stringify` replaces the IAM token with `REDACTED_TOKEN` and excludes
+  raw event/context payloads (issue #4).
+- Last-resort HTTP envelopes contain only static strings
+  ("Internal server error", framework not-found text); unexpected handler
+  failures never leak messages, stack frames or request values into responses.
+- The connector itself performs no logging. Framework-internal logging
+  (Nest's logger reporting an unhandled exception) remains framework behavior;
+  applications decide how to instrument via `@YandexContext()`, stable error
+  codes and the raw escape hatches. Structured redaction utilities land with
+  issue #13.
 
 ## 7. Public API surface
 
@@ -526,14 +624,14 @@ this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
 
 ## 10. Traceability
 
-| Concern                                | Where defined here | Implemented by |
-| -------------------------------------- | ------------------ | -------------- |
-| Bootstrap + lifecycle + race-safe init | §3                 | #3             |
-| Execution context + `@YandexContext()` | §5, §7             | #4             |
-| HTTP request adapter                   | §4, §5, §6.1       | #5             |
-| HTTP response/error mapping            | §6.1               | #6             |
-| MQ event adapter                       | §4, §5             | #7             |
-| Queue decorators/dispatch              | §6.2, §7           | #8             |
-| Body deserialization, attributes       | §4, §5.1, §6.2, §7 | #9             |
-| Unified error/retry/acknowledgement    | §6.3               | #10            |
-| Redaction/security utilities           | §6.3               | #13            |
+| Concern                                | Where defined here   | Implemented by |
+| -------------------------------------- | -------------------- | -------------- |
+| Bootstrap + lifecycle + race-safe init | §3                   | #3             |
+| Execution context + `@YandexContext()` | §5, §7               | #4             |
+| HTTP request adapter                   | §4, §5, §6.1         | #5             |
+| HTTP response/error mapping            | §6.1                 | #6             |
+| MQ event adapter                       | §4, §5               | #7             |
+| Queue decorators/dispatch              | §6.2, §7             | #8             |
+| Body deserialization, attributes       | §4, §5.1, §6.2, §7   | #9             |
+| Unified failure semantics              | §6, §6.3, §6.4, §6.5 | #10            |
+| Redaction/security utilities           | §6.5                 | #13            |
