@@ -17,8 +17,11 @@ import {
  * CLI contract of the local replay tooling (issue #12): selection parsing,
  * concise value-free output and deterministic exit codes — `0` when every
  * selected fixture succeeds, `1` when any replay/load fails, `2` on usage or
- * module-loading errors. The executable shell only wires these functions to
- * process.argv/console/process.exitCode, so behavior is verified in-process.
+ * module-loading errors. Failures render as fixed error categories only
+ * (`ConnectorError[CODE]`, `Error`, `UnknownError`); exception messages may
+ * carry sensitive request data and are never printed. The executable shell
+ * only wires these functions to process.argv/console/process.exitCode, so
+ * behavior is verified in-process.
  *
  * Runs against the built-in probe application unless a module loader seam is
  * injected, which also lets the suite prove failure semantics at CLI level
@@ -60,6 +63,60 @@ QueueMessage()(CliFailingConsumer.prototype, "handle", 0);
 class CliFailingQueueModule {}
 
 Module({ providers: [CliFailingConsumer] })(CliFailingQueueModule);
+
+class CliSensitiveFailureConsumer {
+  handle(): void {
+    throw new Error(
+      "upstream rejected token=REDACTED_TOKEN cookie=REDACTED_SESSION user=user@example.invalid " +
+        'body={"kind":"sensitive","password":"hunter2"}',
+    );
+  }
+}
+
+QueueHandler()(
+  CliSensitiveFailureConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(CliSensitiveFailureConsumer.prototype, "handle")!,
+);
+QueueMessage()(CliSensitiveFailureConsumer.prototype, "handle", 0);
+
+class CliSensitiveFailureQueueModule {}
+
+Module({ providers: [CliSensitiveFailureConsumer] })(CliSensitiveFailureQueueModule);
+
+class CliNonErrorThrowingConsumer {
+  handle(): void {
+    throw { leaked: "thrown-secret-object" };
+  }
+}
+
+QueueHandler()(
+  CliNonErrorThrowingConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(CliNonErrorThrowingConsumer.prototype, "handle")!,
+);
+QueueMessage()(CliNonErrorThrowingConsumer.prototype, "handle", 0);
+
+class CliNonErrorThrowingQueueModule {}
+
+Module({ providers: [CliNonErrorThrowingConsumer] })(CliNonErrorThrowingQueueModule);
+
+class PayloadTouchingConsumer {
+  handle(message: QueueMessage<{ payload: unknown }>): void {
+    void message.payload;
+  }
+}
+
+QueueHandler()(
+  PayloadTouchingConsumer.prototype,
+  "handle",
+  Object.getOwnPropertyDescriptor(PayloadTouchingConsumer.prototype, "handle")!,
+);
+QueueMessage()(PayloadTouchingConsumer.prototype, "handle", 0);
+
+class PayloadTouchingQueueModule {}
+
+Module({ providers: [PayloadTouchingConsumer] })(PayloadTouchingQueueModule);
 
 interface CapturedIo extends ReplayCliIo {
   readonly out: string[];
@@ -199,9 +256,11 @@ describe("replay CLI execution and exit codes", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(io.out[0]).toContain("cli-consumer-boom");
-    // The verbatim application error propagates unwrapped — no ConnectorError
-    // masquerade and no fabricated success result.
+    // The failure renders as the bare error category; the application
+    // message never reaches the output.
+    expect(io.out[0]).toMatch(/^fail\s+mq\s+json-body-message -> Error$/u);
+    expect(io.out.join("\n") + io.err.join("\n")).not.toContain("cli-consumer-boom");
+    // No ConnectorError masquerade and no fabricated success result.
     expect(io.out[0]).not.toContain("ConnectorError[");
   });
 
@@ -232,10 +291,57 @@ describe("replay CLI execution and exit codes", () => {
     expect(rendered).not.toContain("203.0.113.");
     expect(rendered).not.toContain("conformance.gateway.apigw.yandexcloud.net");
   });
+
+  it("renders application failures that embed sensitive values as the bare error category", async () => {
+    const io = capturingIo();
+    const exitCode = await runReplayCli(["--mq", "json-body-message"], io, {
+      loadAppModule: () => CliSensitiveFailureQueueModule,
+    });
+    const rendered = io.out.join("\n") + io.err.join("\n");
+
+    expect(exitCode).toBe(1);
+    expect(io.out[0]).toMatch(/^fail\s+mq\s+json-body-message -> Error$/u);
+    // The thrown message deliberately carries token/cookie/email/password and
+    // request-body markers; none of them may leak into any output stream.
+    expect(rendered).not.toContain("hunter2");
+    expect(rendered).not.toContain("token=");
+    expect(rendered).not.toContain("cookie=");
+    expect(rendered).not.toContain("user@example.invalid");
+    expect(rendered).not.toContain('{"kind":"sensitive"');
+  });
+
+  it("renders thrown non-errors as UnknownError without stringifying them", async () => {
+    const io = capturingIo();
+    const exitCode = await runReplayCli(["--mq", "simple-text-message"], io, {
+      loadAppModule: () => CliNonErrorThrowingQueueModule,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.out[0]).toMatch(/^fail\s+mq\s+simple-text-message -> UnknownError$/u);
+    const rendered = io.out.join("\n") + io.err.join("\n");
+    expect(rendered).not.toContain("thrown-secret-object");
+  });
+
+  it("shows only the stable ConnectorError code, not even boundary message text", async () => {
+    const io = capturingIo();
+    // simple-text-message has a non-JSON body, so touching payload() rejects
+    // with ConnectorError[QUEUE_BODY_DESERIALIZATION_FAILED].
+    const exitCode = await runReplayCli(["--mq", "simple-text-message"], io, {
+      loadAppModule: () => PayloadTouchingQueueModule,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(io.out[0]).toMatch(
+      /^fail\s+mq\s+simple-text-message -> ConnectorError\[QUEUE_BODY_DESERIALIZATION_FAILED\]$/u,
+    );
+    // Even value-free-by-construction boundary messages stay internal; the
+    // code alone is the stable diagnostic signal.
+    expect(io.out.join("\n")).not.toContain("not valid JSON under the default deserialization");
+  });
 });
 
 describe("replay CLI record formatting", () => {
-  it("renders successes with their transport detail and failures with error summaries", () => {
+  it("renders successes with transport detail and failures as fixed value-free categories", () => {
     expect(
       formatReplayRecord({
         kind: "http",
@@ -254,20 +360,16 @@ describe("replay CLI record formatting", () => {
       }),
     ).toBe("ok   mq   simple-text-message -> batch(1)");
 
+    // ConnectorError renders as name[code] only — the stable diagnostic
+    // signal — never its message.
     const boundaryFailure = ConnectorError.unknownInvocationEvent("top-level fields: x");
-    expect(
-      formatReplayRecord({
-        kind: "http",
-        label: "broken",
-        outcome: { fixtureName: "broken", ok: false, error: boundaryFailure },
-        detail: describeForTest(boundaryFailure),
-      }),
-    ).toBe(
-      `fail http broken -> ConnectorError[UNKNOWN_INVOCATION_EVENT] ${boundaryFailure.message}`,
-    );
+    const rendered = formatReplayRecord({
+      kind: "http",
+      label: "broken",
+      outcome: { fixtureName: "broken", ok: false, error: boundaryFailure },
+      detail: `ConnectorError[${boundaryFailure.code}]`,
+    });
+    expect(rendered).toBe("fail http broken -> ConnectorError[UNKNOWN_INVOCATION_EVENT]");
+    expect(rendered).not.toContain(boundaryFailure.message);
   });
 });
-
-function describeForTest(error: ConnectorError): string {
-  return `${error.name}[${error.code}] ${error.message}`;
-}

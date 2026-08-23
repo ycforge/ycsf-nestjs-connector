@@ -44,9 +44,23 @@ Exit codes: `0` — all selected fixtures succeeded; `1` — at least one replay
 or load failure (also when nothing matched); `2` — usage error or unreadable
 `--module`.
 
-Output lines are deliberately value-free (`ok http name -> 200`,
-`fail mq name -> Error: ...`) followed by a summary line, so they are safe to
-paste into issues even though fixtures contain only sanitized placeholders.
+Output lines are deliberately value-free (`ok http name -> 200`) followed by a
+summary line, so they are safe to paste into issues even though fixtures
+contain only sanitized placeholders. Failures render as fixed error
+categories — never exception messages, because application and deserializer
+errors may quote request bodies, credentials or other request data:
+
+```
+fail mq   json-body-message -> Error
+fail mq   simple-text-message -> ConnectorError[QUEUE_BODY_DESERIALIZATION_FAILED]
+fail http broken-fixture -> UnknownError
+```
+
+`ConnectorError` shows its stable machine-readable code; plain `Error`
+subclasses show only the class name (`Error`, `SyntaxError`, ...); thrown
+non-errors render as `UnknownError`. The verbatim error objects are NOT lost:
+programmatic callers receive them unchanged on `FixtureReplayOutcome.error`
+(see below) — full diagnosis belongs there, not in CLI output.
 
 ### Default probe application
 
@@ -96,6 +110,12 @@ const loaded = await replayHttpFixture(MyModule, "repeated-query-parameters");
 // loaded.ok / loaded.result / loaded.error
 ```
 
+Unlike the CLI, the programmatic API does not sanitize anything:
+`FixtureReplayOutcome.error` carries the original thrown value verbatim —
+`ConnectorError` instances with their messages and detail, application errors,
+deserializer failures — so tests and scripts can assert on the exact failure
+while the CLI keeps its output reduced to safe categories.
+
 `createYandexHandler()` is imported through the public barrel (`src/index.ts`)
 inside the helper, which is also asserted by tests: rerouting replay away from
 the production entry point would fail the suite.
@@ -105,6 +125,8 @@ the production entry point would fail the suite.
 - The loader keeps re-redacting `context.token` on every read and validates
   the provenance stamp; malformed or non-reconstructed fixtures fail loudly.
 - Fixtures contain only sanitized placeholders, but CLI output intentionally
-  avoids echoing fixture values anyway; a test pins that sensitive placeholder
-  values never appear in CLI output.
+  avoids echoing fixture values anyway: a test pins that sensitive placeholder
+  values never appear in CLI output, and failure lines are reduced to fixed
+  error categories so exception messages (which may quote request data from
+  custom `--module` applications) can never leak either.
 - Never point `--module` at code you do not trust: it is executed locally.

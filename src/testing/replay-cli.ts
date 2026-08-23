@@ -20,9 +20,13 @@ import { ReplayAppModule } from "./replay-app";
  * results and maps failures onto exit codes.
  *
  * Output is value-free: fixture names, transport kinds, status codes and
- * error messages only. Header values, cookies, bodies and client IPs of the
- * fixtures are never printed (AGENTS.md section 6.2); `ConnectorError`
- * diagnostics are value-free by construction.
+ * FIXED error categories only. Header values, cookies, bodies and client IPs
+ * of the fixtures are never printed (AGENTS.md section 6.2). Exception
+ * messages are suppressed entirely — application and deserializer errors may
+ * quote request data — so failures render as the error class alone
+ * (`ConnectorError[CODE]`, `Error`, `UnknownError`). The verbatim error
+ * objects stay available to programmatic callers through
+ * `FixtureReplayOutcome.error`.
  */
 
 export const REPLAY_CLI_USAGE = `Usage: npm run replay -- [options]
@@ -141,7 +145,7 @@ export interface ReplayCliRecord {
   readonly kind: ReplayFixtureKind;
   readonly label: string;
   readonly outcome: FixtureReplayOutcome;
-  /** Concise value-free detail: status/method/path, batch size or error summary. */
+  /** Concise value-free detail: status code, batch size or error category. */
   readonly detail: string;
 }
 
@@ -179,6 +183,8 @@ export async function runReplayCli(
   try {
     plan = parseReplayCliArgs(argv);
   } catch (error) {
+    // Usage diagnostics are CLI-authored static text (possibly echoing the
+    // caller's own argv); they never contain fixture or application data.
     io.error(error instanceof Error ? error.message : String(error));
     io.error("");
     io.error(REPLAY_CLI_USAGE);
@@ -189,6 +195,8 @@ export async function runReplayCli(
   try {
     appModule = resolveAppModule(plan.modulePath, deps.loadAppModule);
   } catch (error) {
+    // Module-loading diagnostics only ever involve the caller-supplied path;
+    // replay/application failures are rendered value-free below instead.
     io.error(error instanceof Error ? error.message : String(error));
     return 2;
   }
@@ -341,14 +349,29 @@ function describeOutcome(kind: ReplayFixtureKind, outcome: FixtureReplayOutcome)
     : "resolved without a batch";
 }
 
+/**
+ * Renders a failure as a FIXED value-free category. Arbitrary exception
+ * messages are never printed: application and deserializer errors may quote
+ * message bodies, credentials, identifiers or other request data (AGENTS.md
+ * section 6.2), and even `ConnectorError` messages — while composed from
+ * structural diagnostics only — stay internal to the CLI. The verbatim error
+ * object remains on `FixtureReplayOutcome.error` for programmatic callers,
+ * which is where full diagnosis belongs.
+ *
+ * - `ConnectorError` -> `ConnectorError[CODE]`: the stable machine-readable
+ *   code is the diagnostic signal applications branch on anyway.
+ * - `Error`          -> the error class name (`Error`, `SyntaxError`, ...).
+ * - anything else    -> `UnknownError`; thrown non-errors are never
+ *   stringified.
+ */
 function describeError(error: unknown): string {
   if (error instanceof ConnectorError) {
-    return `${error.name}[${error.code}] ${error.message}`;
+    return `${error.name}[${error.code}]`;
   }
-  if (error instanceof Error) {
-    return `${error.name}: ${error.message}`;
+  if (error instanceof Error && typeof error.name === "string" && error.name.length > 0) {
+    return error.name;
   }
-  return String(error);
+  return "UnknownError";
 }
 
 /** True when this compiled file was launched directly as a script. */
