@@ -1,6 +1,10 @@
 {
   "timestamp": "2026-08-21T21:44:52.948Z",
   "node": "v22.15.0",
+  "provenance": {
+    "kind": "reconstructed",
+    "evidence": "DATA-ANALYSE.md"
+  },
   "event": {
     "version": "2.0",
     "rawPath": "/probe/echo",

@@ -14,19 +14,25 @@ import { QueueMessage } from "./queue-message.decorator";
 import { loadQueueFixture, type QueueInvocationFixture } from "../testing/invocation-fixtures";
 
 /**
- * Conformance suite against sanitized captured Message Queue trigger
- * invocations (issue #11).
+ * Conformance suite against sanitized conformance fixtures (issue #11).
  *
- * Every JSON file under `fixtures/mq/` is a full warm-invocation dump of a
- * real queue trigger delivery (provenance and sanitization:
- * fixtures/README.md), replayed through the PUBLIC runtime exactly as Yandex
- * calls it. The tests pin the observed trigger contract end to end: metadata
- * relations (`event_id === message_id`, ISO `created_at` equal to the epoch-ms
- * `SentTimestamp` attribute), string-typed system attributes, user message
- * attribute normalization without value coercion, checksums over UTF-8 bytes,
- * opaque bodies with opt-in strict-JSON payloads, and batch-capable
- * normalization even though the trigger currently delivers one message at a
- * time (AGENTS.md section 4.6).
+ * Every JSON file under `fixtures/mq/` is NOT a literal capture: it is a
+ * sanitized reconstruction of one Message Queue trigger delivery scenario,
+ * distilled from captured evidence (provenance, sanitization rules and
+ * evidence levels: fixtures/README.md; evidence base: DATA-ANALYSE.md).
+ * Identifiers and timestamps inside the fixtures are synthetic placeholders;
+ * the OBSERVED trigger contract they encode carries the evidentiary weight:
+ * metadata relations (`event_id === message_id`, ISO `created_at` equal to
+ * the epoch-ms `SentTimestamp` attribute), string-typed system attributes,
+ * user message attribute normalization without value coercion, checksums over
+ * UTF-8 bytes, opaque bodies with opt-in strict-JSON payloads, and
+ * batch-capable normalization even though the trigger currently delivers one
+ * message at a time (AGENTS.md section 4.6).
+ *
+ * Each fixture replays through the PUBLIC runtime exactly as Yandex calls it.
+ * Assertions validate the implementation against the observed behavior
+ * encoded by each fixture (expected values are derived from the fixture
+ * itself, never treated as original cloud data).
  *
  * Failure propagation semantics are pinned separately by
  * `mq-failure-propagation.spec.ts` (issue #10); this suite only records them
@@ -162,6 +168,16 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     expect(ROUNDS).toHaveLength(ALL_QUEUE_FIXTURE_NAMES.length);
   });
 
+  it("declares reconstructed provenance on every fixture", async () => {
+    for (const name of ALL_QUEUE_FIXTURE_NAMES) {
+      const fixture = await loadQueueFixture(name);
+      // Machine-readable guard against provenance drift: these files are
+      // reconstructions from captured evidence, never literal captures.
+      expect(fixture.provenance.kind).toBe("reconstructed");
+      expect(fixture.provenance.evidence).toBe("DATA-ANALYSE.md");
+    }
+  });
+
   it("preserves identity, checksums and opaque bodies of simple messages", async () => {
     const { fixture, captured, close } = await replay("simple-text-message");
     await close();
@@ -170,12 +186,15 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     const { message, executionContext } = captured;
 
     expect(message.messageId).toBe(envelope.message.message_id);
-    expect(message.body).toBe("Hello from Yandex Message Queue!");
+    expect(message.body).toBe(envelope.message.body);
+    expect(envelope.message.body).not.toMatch(/^\s*[[{]/); // opaque, not pre-parsed
     expect(message.md5OfBody).toBe(envelope.message.md5_of_body);
+    // Checksum integrity: md5 recomputed over the UTF-8 body bytes matches.
+    expect(createUtf8Md5(envelope.message.body)).toBe(message.md5OfBody);
     // event_id and message_id are observed identical on the real trigger.
     expect(fixture.event.messages[0]!.event_metadata.event_id).toBe(message.messageId);
     expect(executionContext.awsRequestId).toBe(fixture.context.awsRequestId);
-    // The raw escape hatch exposes the untouched envelope.
+    // The raw escape hatch exposes the fixture envelope unchanged.
     expect((message.raw as { details?: unknown }).details).toBe(envelope);
   });
 
@@ -183,9 +202,11 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     const { fixture, captured, close } = await replay("complete-metadata-and-system-attributes");
     await close();
 
+    const envelope = fixture.event.messages[0]!.details;
     const metadata = fixture.event.messages[0]!.event_metadata;
     const { message } = captured;
 
+    // The observed system attribute NAME SET (DATA-ANALYSE.md section C).
     expect(Object.keys(message.attributes)).toEqual([
       "ApproximateFirstReceiveTimestamp",
       "ApproximateReceiveCount",
@@ -196,7 +217,8 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
       expect(typeof value).toBe("string");
     }
     // Observed relation: ISO created_at equals the epoch-millisecond
-    // SentTimestamp attribute; ApproximateReceiveCount starts at "1".
+    // SentTimestamp attribute; ApproximateReceiveCount starts at "1"
+    // (observed constant across the capture dataset).
     expect(Number.parseInt(message.attributes.SentTimestamp!, 10)).toBe(
       Date.parse(metadata.created_at),
     );
@@ -207,27 +229,27 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     expect(message.eventMetadata.folderId).toBe(metadata.folder_id);
     // No user attributes: the observed checksum placeholder is the empty string.
     expect(message.md5OfMessageAttributes).toBe("");
-    expect(message.queueId).toBe(fixture.event.messages[0]!.details.queue_id);
-    expect(message.payload).toEqual({});
+    expect(message.queueId).toBe(envelope.queue_id);
+    expect(message.payload).toEqual(JSON.parse(envelope.message.body));
   });
 
   it("deserializes json bodies strictly and keeps unicode bodies byte-faithful", async () => {
     const json = await replay("json-body-message");
     await json.close();
-    expect(json.captured.message.body).toBe('{"orderId":"order-conf-1","items":3,"paid":true}');
-    expect(json.captured.message.payload).toEqual({
-      orderId: "order-conf-1",
-      items: 3,
-      paid: true,
-    });
+    const jsonEnvelope = json.fixture.event.messages[0]!.details.message;
+    // Opaque at the transport boundary: the body string passes through
+    // unchanged; only payload access deserializes it.
+    expect(json.captured.message.body).toBe(jsonEnvelope.body);
+    expect(json.captured.message.payload).toEqual(JSON.parse(jsonEnvelope.body));
 
     const unicode = await replay("unicode-body-message");
     await unicode.close();
+    const unicodeEnvelope = unicode.fixture.event.messages[0]!.details.message;
     const { message } = unicode.captured;
-    expect(message.body).toBe('{"text":"привет мир 🌍","tags":["тест","😀"]}');
-    expect(message.payload).toEqual({ text: "привет мир 🌍", tags: ["тест", "😀"] });
+    expect(message.body).toBe(unicodeEnvelope.body);
+    expect(message.payload).toEqual(JSON.parse(unicodeEnvelope.body));
     // md5_of_body is computed over the UTF-8 encoding of the body.
-    expect(createUtf8Md5(message.body)).toBe(message.md5OfBody);
+    expect(createUtf8Md5(unicodeEnvelope.body)).toBe(message.md5OfBody);
   });
 
   it("normalizes custom message attributes without coercing their values", async () => {
@@ -235,26 +257,29 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     await close();
 
     const wireAttributes = fixture.event.messages[0]!.details.message.message_attributes;
+    const wireNames = Object.keys(wireAttributes);
+    expect(wireNames.length).toBeGreaterThan(1);
     const { message } = captured;
 
-    expect(message.messageAttributes.Scenario).toEqual({
-      dataType: "String",
-      stringValue: "retry",
-    });
-    // Number-typed attributes keep their string_value verbatim ("1" stays "1").
-    expect(message.messageAttributes.Attempt).toEqual({ dataType: "Number", stringValue: "1" });
-    expect(message.messageAttributes.Attempt?.stringValue).not.toBe(1);
-    expect(wireAttributes.Scenario).toEqual({
-      data_type: "String",
-      string_value: "retry",
-    });
-    // The committed checksum matches the SQS-compatible algorithm YMQ mirrors
-    // (evidence level: inferred — see fixtures/README.md).
+    // Normalization maps data_type/string_value -> dataType/stringValue for
+    // every declared attribute, preserving values exactly as sent.
+    for (const name of wireNames) {
+      expect(message.messageAttributes[name]).toEqual({
+        dataType: wireAttributes[name]!.data_type,
+        stringValue: wireAttributes[name]!.string_value,
+      });
+      // No numeric coercion: a Number-typed attribute's string_value stays a
+      // string ("1" must never become 1).
+      expect(typeof message.messageAttributes[name]!.stringValue).toBe("string");
+    }
+    // User attributes present: the checksum is non-empty. Its exact value
+    // follows an SQS-compatible algorithm (evidence level: inferred — see
+    // fixtures/README.md), so only presence is pinned here.
     expect(message.md5OfMessageAttributes).toBeTruthy();
   });
 
   it("reports QUEUE_BODY_DESERIALIZATION_FAILED lazily for non-json bodies", async () => {
-    const { close } = await replay("simple-text-message", ProbeModule);
+    const { fixture, close } = await replay("simple-text-message", ProbeModule);
     await close();
 
     expect(PAYLOAD_MESSAGE_IDS).toHaveLength(1);
@@ -262,16 +287,19 @@ describe("Message Queue conformance fixtures (issue #11)", () => {
     expect(failure).toBeInstanceOf(ConnectorError);
     expect((failure as ConnectorError).code).toBe("QUEUE_BODY_DESERIALIZATION_FAILED");
     // The failing evaluation leaves the raw body intact for user code.
-    expect(PAYLOAD_RAW_BODIES[0]).toBe("Hello from Yandex Message Queue!");
+    expect(PAYLOAD_RAW_BODIES[0]).toBe(fixture.event.messages[0]!.details.message.body);
   });
 
   it("redacts the service-account token through context serialization", async () => {
     const { fixture, captured, close } = await replay("json-body-message");
     await close();
 
-    expect(JSON.stringify(captured.executionContext)).not.toContain("[REDACTED]");
+    // Whatever sanitized placeholder the fixture carries never leaks through
+    // serialization; the redaction contract itself is fixed.
+    expect(JSON.stringify(captured.executionContext)).not.toContain(String(fixture.context.token));
     expect(captured.executionContext.toJSON().token).toBe("REDACTED_TOKEN");
-    // The undocumented _data mirror of the raw event stays reachable.
+    // The undocumented _data mirror stays reachable and carries the fixture's
+    // own (sanitized) event: structural mirror, not original runtime data.
     expect((captured.executionContext.raw as { _data?: unknown })._data).toEqual(fixture.event);
   });
 

@@ -9,15 +9,23 @@ import { loadHttpFixture, type HttpInvocationFixture } from "../testing/invocati
 import type { NormalizedHttpRequest } from "./normalized-request";
 
 /**
- * Conformance suite against sanitized captured Yandex invocations (issue #11).
+ * Conformance suite against sanitized conformance fixtures (issue #11).
  *
- * Every JSON file under `fixtures/http/` is a full warm-invocation dump of a
- * real API Gateway payload-format-2.0 delivery (provenance and sanitization:
- * fixtures/README.md). Each dump is replayed through the PUBLIC runtime —
- * exactly the `(event, context) => response` signature Yandex calls — and the
- * normalized request is captured inside the controller via the invocation
- * scope. The tests pin observed gateway behavior that must never regress
- * (DATA-ANALYSE.md), including the quirks listed in AGENTS.md section 4.
+ * Every JSON file under `fixtures/http/` is NOT a literal capture: it is a
+ * sanitized reconstruction of one API Gateway payload-format-2.0 invocation
+ * scenario, distilled from captured evidence (provenance, sanitization rules
+ * and evidence levels: fixtures/README.md; evidence base: DATA-ANALYSE.md).
+ * Identifiers, timestamps, addresses and credential placeholders inside the
+ * fixtures are synthetic; the OBSERVED structure and gateway behaviors they
+ * encode carry the evidentiary weight.
+ *
+ * Each fixture replays through the PUBLIC runtime — exactly the
+ * `(event, context) => response` signature Yandex calls — with the normalized
+ * request captured inside the controller via the invocation scope. Assertions
+ * therefore validate the implementation against the observed behavior encoded
+ * by each fixture (expected values are derived from the fixture itself, never
+ * treated as original cloud data), plus explicitly documented observed quirks
+ * such as those listed in AGENTS.md section 4.
  *
  * Decorators are applied imperatively (legacy desugaring shape) so the suite
  * stays independent of this repository's decorator compilation settings.
@@ -119,65 +127,93 @@ describe("HTTP conformance fixtures (issue #11)", () => {
     expect(CAPTURES).toHaveLength(ALL_HTTP_FIXTURE_NAMES.length);
   });
 
+  it("declares reconstructed provenance on every fixture", async () => {
+    for (const name of ALL_HTTP_FIXTURE_NAMES) {
+      const fixture = await loadHttpFixture(name);
+      // Machine-readable guard against provenance drift: these files are
+      // reconstructions from captured evidence, never literal captures.
+      expect(fixture.provenance.kind).toBe("reconstructed");
+      expect(fixture.provenance.evidence).toBe("DATA-ANALYSE.md");
+    }
+  });
+
   it("routes on rawPath even when the gateway rebuilt requestContext.http.path", async () => {
-    // get-without-query carries httpPath "/probe/ping?" (trailing ?); the
-    // encoded-path fixture carries a decoded "?" INSIDE its path. Both must
-    // route by rawPath; requestContext.http.path must stay untouched.
+    // get-without-query carries httpPath "/probe/ping?" (trailing ?, an
+    // observed rebuild quirk); the encoded-path fixture carries a decoded "?"
+    // INSIDE its path. Both must route by rawPath; requestContext.http.path
+    // stays untouched pass-through.
     const trailing = await replay("get-without-query");
     expect(trailing.fixture.event.requestContext.http.path).toBe("/probe/ping?");
-    expect(trailing.captured.normalizedRequest.path).toBe("/probe/ping");
+    expect(trailing.captured.normalizedRequest.path).toBe(trailing.fixture.event.rawPath);
 
     const encoded = await replay("encoded-path-characters");
-    expect(encoded.fixture.event.rawPath).toBe("/probe/with space/and/encoded?chars");
-    expect(encoded.fixture.event.requestContext.http.path).toBe(
-      "/probe/with space/and/encoded?chars?x=1",
+    // Observed hazard: the encoded ? decodes INTO rawPath.
+    expect(encoded.fixture.event.rawPath).toContain("?");
+    expect(encoded.captured.normalizedRequest.path).toBe(encoded.fixture.event.rawPath);
+    expect(encoded.fixture.event.requestContext.http.path).not.toBe(
+      encoded.captured.normalizedRequest.path,
     );
-    expect(encoded.captured.normalizedRequest.path).toBe("/probe/with space/and/encoded?chars");
   });
 
   it("preserves repeated query parameters in both gateway representations", async () => {
-    const { captured } = await replay("repeated-query-parameters");
+    const { captured, fixture } = await replay("repeated-query-parameters");
     const { normalizedRequest } = captured;
+    const event = fixture.event;
 
-    expect(normalizedRequest.rawQueryString).toBe("multi=one&multi=two&multi=three&flag=on");
-    // Verbatim comma join in queryStringParameters...
-    expect(normalizedRequest.queryStringParameters.multi).toBe("one,two,three");
-    // ...and true multiplicity in multiValueParameters.
-    expect(normalizedRequest.multiValueParameters.multi).toEqual(["one", "two", "three"]);
-    // searchParams parses the canonical rawQueryString, not the collapsed map.
-    expect(normalizedRequest.searchParams.getAll("multi")).toEqual(["one", "two", "three"]);
-    // Declared parameters collapse repeats: last value wins.
-    expect(captured.normalizedRequest.raw.parameters?.multi).toBe("three");
+    // Canonical client query string passes through unchanged.
+    expect(normalizedRequest.rawQueryString).toBe(event.rawQueryString);
+    // Gateway's comma join of repeated values is preserved verbatim...
+    expect(normalizedRequest.queryStringParameters).toEqual(event.queryStringParameters);
+    // ...and true multiplicity is preserved in the multi-value view.
+    expect(normalizedRequest.multiValueParameters).toEqual(event.multiValueParameters);
+    const repeated = event.multiValueParameters.multi ?? [];
+    expect(repeated.length).toBeGreaterThan(1);
+    // searchParams parses the canonical rawQueryString, so multiplicity
+    // survives there too instead of collapsing to the comma-joined map.
+    expect(normalizedRequest.searchParams.getAll("multi")).toEqual(repeated);
+    // Declared gateway parameters collapse repeats: last value wins.
+    expect(captured.normalizedRequest.raw.parameters?.multi).toBe(repeated[repeated.length - 1]);
   });
 
   it("decodes url-encoded query values without touching the raw query string", async () => {
     const { captured, fixture } = await replay("url-encoded-query-values");
     const { normalizedRequest } = captured;
+    const event = fixture.event;
 
-    expect(normalizedRequest.searchParams.get("text")).toBe("тест");
-    expect(normalizedRequest.searchParams.get("emoji")).toBe("😀");
-    expect(normalizedRequest.searchParams.get("phrase")).toBe("hello world");
-    expect(normalizedRequest.searchParams.get("punct")).toBe("/?&=%#+");
-    expect(normalizedRequest.rawQueryString).toContain("%D1%82%D0%B5%D1%81%D1%82");
+    // The connector's parse must agree with the gateway's independently
+    // decoded queryStringParameters for every key (Unicode, emoji, reserved
+    // characters included) — derived from the fixture, not from literals.
+    for (const [key, value] of Object.entries(event.queryStringParameters)) {
+      expect(normalizedRequest.searchParams.get(key)).toBe(value);
+      expect(normalizedRequest.queryStringParameters[key]).toBe(value);
+    }
+    expect(normalizedRequest.rawQueryString).toBe(event.rawQueryString);
     // Rebuilt gateway path lowercased percent hex and swapped + for spaces —
-    // another reason it must never become the routing source.
-    expect(fixture.event.requestContext.http.path).toContain("phrase=hello+world");
-    expect(fixture.event.requestContext.http.path).toContain("%d1%82%d0%b5%d1%81%d1%82");
+    // documented OBSERVED rebuild shape; another reason it must never become
+    // the routing source.
+    expect(event.requestContext.http.path).toContain("phrase=hello+world");
+    expect(event.requestContext.http.path).toContain("%d1%82%d0%b5%d1%81%d1%82");
   });
 
-  it("exposes catch-all gateway path parameters verbatim", async () => {
+  it("exposes catch-all gateway path parameters as provided", async () => {
     const users = await replay("catch-all-path-parameters");
-    expect(users.captured.normalizedRequest.pathParameters.ID).toBe("probe/users/user-42");
-    expect(users.captured.normalizedRequest.path).toBe("/probe/users/user-42");
+    const event = users.fixture.event;
+    expect(users.captured.normalizedRequest.pathParameters.ID).toBe(event.parameters.ID);
+    expect(users.captured.normalizedRequest.path).toBe(event.rawPath);
   });
 
   it("keeps custom headers, cookies and client metadata accessible", async () => {
     const { captured, fixture } = await replay("custom-headers-and-cookies");
     const { normalizedRequest, executionContext } = captured;
+    const eventHeaders = fixture.event.headers;
 
-    expect(normalizedRequest.headers.Authorization).toBe("Bearer REDACTED_AUTHORIZATION");
-    expect(normalizedRequest.headers.Cookie).toContain("test_cookie=cookie-value");
-    expect(normalizedRequest.sourceIp).toBe("203.0.113.10");
+    // Header values are transport pass-through: whatever the fixture carries
+    // (here sanitized placeholders per AGENTS.md 6.3) reaches the app intact.
+    expect(normalizedRequest.headers.Authorization).toBe(eventHeaders.Authorization);
+    expect(normalizedRequest.headers.Cookie).toBe(eventHeaders.Cookie);
+    // Sanitization policy spot-check: client IPs stay TEST-NET placeholders.
+    expect(fixture.event.requestContext.http.sourceIp).toMatch(/^203\.0\.113\./);
+    expect(normalizedRequest.sourceIp).toBe(fixture.event.requestContext.http.sourceIp);
     expect(normalizedRequest.userAgent).toBe(fixture.event.requestContext.http.userAgent);
     // Correlation ids line up across event/context/header.
     expect(normalizedRequest.requestId).toBe(fixture.context.awsRequestId);
@@ -187,32 +223,38 @@ describe("HTTP conformance fixtures (issue #11)", () => {
   it("keeps application/json bodies plain UTF-8 text", async () => {
     const { captured, fixture } = await replay("json-body-plain-utf8");
     expect(fixture.event.isBase64Encoded).toBe(false);
-    expect(bodyText(captured.normalizedRequest)).toBe(
-      '{"orderId":"order-conf-1","comment":"подтверждение ✔"}',
-    );
+    // Plain-text contract: decoded body equals the wire string verbatim.
+    expect(bodyText(captured.normalizedRequest)).toBe(String(fixture.event.body));
   });
 
   it("decodes base64 bodies for non-json content types without parsing them", async () => {
+    const expectedBytes = (fixture: HttpInvocationFixture): Uint8Array =>
+      Buffer.from(String(fixture.event.body), "base64");
+
     const text = await replay("plain-text-body-base64");
     expect(text.fixture.event.isBase64Encoded).toBe(true);
-    expect(bodyText(text.captured.normalizedRequest)).toBe("Hello, Yandex Cloud Function!");
+    // Decoding correctness: bytes equal the Base64 payload decoded, NOT the
+    // untouched wire string.
+    expect(text.captured.normalizedRequest.body).toEqual(expectedBytes(text.fixture));
+    expect(bodyText(text.captured.normalizedRequest)).not.toBe(text.fixture.event.body);
 
     const form = await replay("form-body-base64");
-    // Forms arrive unparsed: normalization must not invent form handling.
-    expect(bodyText(form.captured.normalizedRequest)).toBe(
-      "name=Alice&age=30&active=true&tag=one&tag=two",
-    );
+    // Forms arrive unparsed: normalization must not invent form handling, so
+    // the decoded form text survives byte-exactly including its separators.
+    expect(form.captured.normalizedRequest.body).toEqual(expectedBytes(form.fixture));
+    expect(bodyText(form.captured.normalizedRequest)).toContain("&tag=two");
 
     const binary = await replay("binary-body-base64");
-    // The captured artifact decodes byte-exactly; documented in DATA-ANALYSE
-    // (its prose lists byte 5 as 0x77 while the base64 yields 0x7f — the
-    // base64 string is the authoritative artifact).
+    // Byte-exact binary round trip. The explicit byte list documents what this
+    // committed artifact decodes to (DATA-ANALYSE prose lists byte 5 as 0x77
+    // while the authoritative artifact yields 0x7f).
     expect([...binary.captured.normalizedRequest.body!]).toEqual([0, 1, 2, 3, 127, 128, 255]);
+    expect(binary.captured.normalizedRequest.body).toEqual(expectedBytes(binary.fixture));
 
     const customJson = await replay("custom-json-content-type-base64");
     // Suffix JSON types are NOT granted plain-text treatment.
     expect(customJson.fixture.event.isBase64Encoded).toBe(true);
-    expect(bodyText(customJson.captured.normalizedRequest)).toBe('{"source":"custom"}');
+    expect(customJson.captured.normalizedRequest.body).toEqual(expectedBytes(customJson.fixture));
   });
 
   it("surfaces an empty bodiless GET as a null body despite isBase64Encoded", async () => {
@@ -225,16 +267,20 @@ describe("HTTP conformance fixtures (issue #11)", () => {
     const { captured, fixture } = await replay("get-without-query");
     const { executionContext } = captured;
 
-    // memoryLimitInMB stays the string the runtime delivers.
-    expect(executionContext.memoryLimitInMB).toBe("1024");
+    // memoryLimitInMB stays the string the runtime delivers (the observed
+    // invariant is the TYPE; the value comes from the fixture itself).
+    expect(executionContext.memoryLimitInMB).toBe(String(fixture.context.memoryLimitInMB));
     expect(typeof executionContext.memoryLimitInMB).toBe("string");
     expect(executionContext.deadlineMs).toBeGreaterThan(0);
-    // timeEpoch is seconds on the wire despite its name.
+    // timeEpoch is seconds on the wire despite its name (observed).
     expect(fixture.event.requestContext.timeEpoch).toBeLessThan(10_000_000_000);
-    // The undocumented _data mirror stays reachable through raw.
+    // The undocumented _data mirror stays reachable through raw and carries
+    // exactly the fixture's (sanitized) event — structural mirror, not
+    // original runtime data.
     expect((executionContext.raw as { _data?: unknown })._data).toEqual(fixture.event);
-    // Serialization guard: the token placeholder can never leak through toJSON.
-    expect(JSON.stringify(executionContext)).not.toContain("[REDACTED]");
+    // Serialization guard: whatever token placeholder a fixture carries can
+    // never leak through toJSON; the redaction contract is fixed.
+    expect(JSON.stringify(executionContext)).not.toContain(String(fixture.context.token));
     expect(executionContext.toJSON().token).toBe("REDACTED_TOKEN");
   });
 
@@ -249,7 +295,7 @@ describe("HTTP conformance fixtures (issue #11)", () => {
     // in the invocation-scoped data: the second replay carries its own query
     // string, never the first one's repeated parameters.
     expect(second.captured.normalizedRequest.rawQueryString).toBe(
-      "text=%D1%82%D0%B5%D1%81%D1%82&emoji=%F0%9F%98%80&phrase=hello%20world&punct=%2F%3F%26%3D%25%23%2B",
+      second.fixture.event.rawQueryString,
     );
     expect(second.captured.normalizedRequest.searchParams.has("multi")).toBe(false);
   });
