@@ -23,7 +23,10 @@ independent of Yandex Cloud whenever practical.
 > adapter (detection, validation, batch normalization) with issue #7, queue
 > handler dispatch with `@QueueHandler()`/`@QueueMessage()` injection
 > with issue #8, typed queue body payloads with issue #9, and unified
-> invocation failure semantics with issue #10. Observed Yandex Cloud runtime
+> invocation failure semantics with issue #10. A replayable conformance suite
+> built from sanitized captured Yandex invocations (HTTP and Message Queue)
+> guards the observed runtime contract end to end (issue #11,
+> [fixtures/](./fixtures)). Observed Yandex Cloud runtime
 > constraints that all connector code must respect are catalogued in
 > [AGENTS.md](./AGENTS.md).
 
