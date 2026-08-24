@@ -139,6 +139,50 @@ describe("HTTP end-to-end lifecycle through the public connector", () => {
     });
   });
 
+  it("exposes both gateway representations of repeated query parameters", async () => {
+    const response = (await runtime(
+      makeHttpEvent({
+        path: "/lifecycle/queries",
+        rawQueryString: "single=one&repeated=first&repeated=second",
+        queryStringParameters: { single: "one", repeated: "first,second" },
+        multiValueParameters: { single: ["one"], repeated: ["first", "second"] },
+      }),
+      makeRuntimeContext("query-http-1"),
+    )) as Record<string, unknown>;
+
+    expect(response.statusCode).toBe(200);
+    // Nest's @Query() parses the canonical rawQueryString, so repeated keys
+    // keep their multiplicity as arrays; the verbatim gateway fields stay
+    // reachable through the context escape hatch in their observed forms —
+    // comma-folded queryStringParameters vs multiValueParameters lists. The
+    // two representations are never merged into one (AGENTS.md section 4.3).
+    expect(parseEnvelopeBody(response)).toEqual({
+      parsedSingle: "one",
+      parsedRepeated: ["first", "second"],
+      gatewayFolded: "first,second",
+      gatewayMulti: ["first", "second"],
+    });
+  });
+
+  it("serializes custom headers and repeated Set-Cookie values into the envelope", async () => {
+    const response = (await runtime(
+      makeHttpEvent({ path: "/lifecycle/headers" }),
+      makeRuntimeContext("headers-http-1"),
+    )) as Record<string, unknown> & { multiValueHeaders?: Record<string, string[]> };
+
+    expect(response.statusCode).toBe(204);
+    // Single-value headers land in the flat map (lowercased like platform
+    // routers emit them); repeated values move to multiValueHeaders instead
+    // of being lossily joined, and the repeated name stays out of the flat
+    // map entirely. end() without a payload must not invent a content type.
+    expect(response.headers).toEqual({ "x-custom-trace": "trace-e2e-1" });
+    expect(response.multiValueHeaders).toEqual({
+      "set-cookie": ["session=42; Path=/", "theme=dark; Path=/; Secure"],
+    });
+    expect(response.body).toBe("");
+    expect(response.isBase64Encoded).toBe(false);
+  });
+
   it("maps HttpExceptions to their deterministic status-code envelope", async () => {
     const response = (await runtime(
       makeHttpEvent({ path: "/lifecycle/failures/http" }),

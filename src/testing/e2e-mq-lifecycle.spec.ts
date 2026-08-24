@@ -115,6 +115,20 @@ describe("Message Queue end-to-end lifecycle through the public connector", () =
     }
     expect(new Set([...clockByMessage.values()].map((clocks) => [...clocks][0]!)).size).toBe(3);
 
+    // TRANSIENT-scoped stamps resolve fresh per injection point even inside
+    // one message sub-tree — audit and mirror never share a stamp instance,
+    // and all six resolutions across three messages are distinct.
+    for (const messageId of ["di-m-1", "di-m-2", "di-m-3"]) {
+      const auditRound = auditHandlerRounds.find((round) => round.messageId === messageId);
+      const mirrorRound = mirrorHandlerRounds.find((round) => round.messageId === messageId);
+      expect(auditRound?.stampInstanceId).toBeDefined();
+      expect(auditRound?.stampInstanceId).not.toBe(mirrorRound?.stampInstanceId);
+    }
+    expect(
+      new Set([...auditHandlerRounds, ...mirrorHandlerRounds].map((round) => round.stampInstanceId))
+        .size,
+    ).toBe(6);
+
     // The DEFAULT-scoped singleton is one instance for the whole warm
     // application — identical in every round of every consumer.
     const singletonIds = new Set(
@@ -124,9 +138,10 @@ describe("Message Queue end-to-end lifecycle through the public connector", () =
   });
 
   it("shares one memoized payload object between both fan-out handlers", async () => {
+    const deliveredBody = JSON.stringify({ orderId: "order-memo", items: [1, 2, 3] });
     const delivery = makeQueueDelivery({
       messageId: "memo-m-1",
-      body: JSON.stringify({ orderId: "order-memo", items: [1, 2, 3] }),
+      body: deliveredBody,
     });
     await runtime(delivery, makeRuntimeContext("mq-memo-1"));
 
@@ -135,6 +150,18 @@ describe("Message Queue end-to-end lifecycle through the public connector", () =
     // Memoization contract (issue #8): the same deserialized object instance
     // is handed to every consumer of the message, not a fresh parse each time.
     expect(mirrorRound?.payloadReference).toBe(auditRound?.payloadReference);
+
+    // The untouched transport representations stay available alongside the
+    // typed payload: verbatim body text and the whole wire envelope with its
+    // identity, checksum and system attributes (AGENTS.md section 32).
+    expect(auditRound?.messageReference?.body).toBe(deliveredBody);
+    expect(auditRound?.messageReference?.md5OfBody).toBe("9e107d9d372bb6826bd81d3542a419d6");
+    expect(auditRound?.messageReference?.attributes).toMatchObject({
+      ApproximateReceiveCount: "1",
+    });
+    const wire = auditRound?.messageReference?.raw;
+    expect(wire?.details.message.message_id).toBe("memo-m-1");
+    expect(wire?.details.queue_id).toContain("f-lifecycle");
   });
 
   it("propagates payload deserialization failures and records no handler rounds", async () => {
