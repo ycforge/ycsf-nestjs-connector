@@ -1,40 +1,101 @@
 # @ycforge/ycsf-nestjs-connector
 
 NestJS adapter for [Yandex Cloud Functions](https://yandex.cloud/en/services/functions).
-It lets a NestJS application run inside a Yandex Cloud Function behind two transports:
+It lets a normal NestJS application run inside a Yandex Cloud Function behind two
+transports:
 
 - **HTTP / API Gateway** — Yandex API Gateway payload format `2.0`, synchronous
-  request/response semantics, normal NestJS controllers.
+  request/response semantics, ordinary NestJS controllers.
 - **Message Queue** — Yandex Cloud Functions Message Queue trigger, asynchronous
-  invocation semantics, message handlers built from NestJS abstractions.
+  invocation semantics, message consumers built from NestJS abstractions.
 
-The package is intentionally a thin runtime/transport adapter: it must not turn
-NestJS into a Yandex-specific application framework. Business logic stays
-independent of Yandex Cloud whenever practical.
+The package is intentionally a thin runtime/transport adapter: it does not turn
+NestJS into a Yandex-specific application framework. Controllers, services and
+queue consumers stay plain NestJS code; Yandex-specific data stays reachable but
+out of the way. The design-of-record is
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); compatibility and versioning
+rules are [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md).
 
-> **Status: runtime bootstrap, execution context, the full HTTP transport and
-> the Message Queue transport have landed.** The package architecture and
-> public contracts are established (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-> and [`src/index.ts`](./src/index.ts)); the central function factory shipped
-> with issue #3, the normalized execution context with `@YandexContext()`
-> injection with issue #4, the Yandex API Gateway v2 HTTP request adapter
-> (detection, validation, normalization) with issue #5, HTTP response/error
-> mapping plus controller dispatch with issue #6, the Message Queue event
-> adapter (detection, validation, batch normalization) with issue #7, queue
-> handler dispatch with `@QueueHandler()`/`@QueueMessage()` injection
-> with issue #8, typed queue body payloads with issue #9, and unified
-> invocation failure semantics with issue #10. A replayable conformance suite
-> built from sanitized fixtures reconstructed from captured Yandex invocations
-> (HTTP and Message Queue) guards the observed runtime contract end to end
-> (issue #11, [fixtures/](./fixtures)), and an explicit redaction policy for
-> diagnostic serialization ships as `safeDiagnostics` (issue #13). End-to-end
-> lifecycle suites drive complete HTTP and Message Queue invocations — full
-> framework stacks, cold/warm/concurrent bootstrapping and cross-transport
-> isolation — through the public connector API (issue #14). Observed
-> Yandex Cloud runtime constraints that all connector code must respect are
-> catalogued in [AGENTS.md](./AGENTS.md).
+## Requirements
 
-## Usage
+- Node.js >= 22 (the function runtime and your build toolchain)
+- Peer dependencies: `@nestjs/common` and `@nestjs/core` (`^11`) — any NestJS 11
+  project already has them
+
+## Installation
+
+```bash
+npm install @ycforge/ycsf-nestjs-connector
+```
+
+The published artifact is CommonJS with declaration files, so no bundler is
+required: compile your function (for example with `tsc`) to CommonJS JavaScript
+and deploy the output together with `node_modules`.
+
+## How it works
+
+```ts
+import { createYandexHandler } from "@ycforge/ycsf-nestjs-connector";
+import { AppModule } from "./app.module";
+
+export const handler = createYandexHandler(AppModule);
+```
+
+`createYandexHandler(AppModule)` turns your root module into the handler the
+function runtime invokes:
+
+- Every incoming event is detected once at the boundary: API Gateway v2 events
+  go to the HTTP transport, Message Queue trigger deliveries go to the queue
+  transport, anything else fails fast with a diagnostic error — it is never
+  silently treated as HTTP.
+- The Nest application is bootstrapped lazily on the first invocation and then
+  cached: warm invocations reuse the initialized application instead of paying
+  the cold start again.
+- One exported handler can serve both transports at the same time (an HTTP
+  trigger and a Message Queue trigger pointing at the same function), because
+  transports never share behavior.
+- All per-invocation state (event, context, normalized request/message) is
+  scoped to that single invocation; nothing leaks between invocations.
+
+## Minimal HTTP function
+
+A complete function needs three small files.
+
+**`orders.controller.ts`**
+
+```ts
+import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
+
+@Controller("orders")
+export class OrdersController {
+  // GET /orders/42?expand=items -> {"id":"42","expand":"items"}
+  @Get(":id")
+  find(@Param("id") id: string, @Query("expand") expand?: string): object {
+    return { id, expand };
+  }
+
+  @Post()
+  create(@Body() body: unknown): object {
+    return { received: body };
+  }
+}
+```
+
+Standard Nest parameter decorators work as usual: `@Query()` parses the
+canonical query string, `@Param()` reads path parameters, `@Body()` receives
+the decoded request body, guards/interceptors/pipes/filters behave unchanged.
+
+**`app.module.ts`**
+
+```ts
+import { Module } from "@nestjs/common";
+import { OrdersController } from "./orders.controller";
+
+@Module({ controllers: [OrdersController] })
+export class AppModule {}
+```
+
+**`index.ts`**
 
 ```ts
 import { createYandexHandler } from "@ycforge/ycsf-nestjs-connector";
@@ -42,283 +103,327 @@ import { AppModule } from "./app.module";
 
 // Bootstraps Nest lazily on the first invocation, then reuses the cached
 // application for every warm invocation.
-const handler = createYandexHandler(AppModule);
-
-export default { handler };
+export const handler = createYandexHandler(AppModule);
 ```
 
-### Normalized execution context
+Deploy it like any Node.js Yandex Cloud Function:
 
-Handlers and HTTP controllers can access runtime metadata through
-`@YandexContext()` parameter injection instead of touching raw Yandex objects.
-The injection works identically on both transports: queue dispatch fills
-registered positions directly, while HTTP route arguments resolve through
-Nest's native parameter mechanism backed by the same invocation scope.
+1. Compile to CommonJS into `dist/` (`npx tsc -p tsconfig.json`).
+2. Create a Node.js 22 function and set its entry point to the exported
+   handler, e.g. `dist/index.handler`.
+3. For HTTP traffic, connect an [API Gateway](https://yandex.cloud/en/services/api-gateway)
+   using payload format `2.0` — the format this package implements.
+
+## Synchronous vs asynchronous transports
+
+|                | HTTP / API Gateway                          | Message Queue trigger                                 |
+| -------------- | ------------------------------------------- | ----------------------------------------------------- |
+| Execution      | synchronous request/response                | asynchronous delivery                                 |
+| Result         | HTTP response envelope                      | none — success means the delivery was fully processed |
+| Handler errors | mapped to HTTP responses via Nest semantics | fail the whole invocation so retries/DLQ stay working |
+| Trigger setup  | API Gateway (payload format `2.0`)          | Message Queue trigger invoking the function           |
+
+Both transports inject the same execution context and share one warm
+application; they differ only in what an invocation produces.
+
+## HTTP request and response behavior
+
+These rules reproduce observed API Gateway v2 behavior (see
+[DATA-ANALYSE.md](./DATA-ANALYSE.md)); they are pinned by conformance fixtures.
+
+### Body encoding
+
+The gateway encodes bodies by content type:
+
+- `Content-Type: application/json` arrives as plain UTF-8 text
+  (`isBase64Encoded === false`);
+- everything else — plain text, forms, binaries, missing content types,
+  empty bodies — arrives Base64-encoded (`isBase64Encoded === true`).
+
+Decoding follows `isBase64Encoded`, never a Content-Type guess, so binary data
+cannot be corrupted. Malformed JSON request bodies surface as deterministic
+`400 Bad Request` responses, exactly like on any other platform.
+
+### Canonical path and query
+
+Routing uses `rawPath`, and `@Query()` parses `rawQueryString`. These are the
+canonical representations of the original request; the rebuilt
+`requestContext.http.path` is deliberately ignored because the gateway may
+reorder query parameters or append a trailing `?` there.
+
+### Repeated query parameters
+
+For `GET /orders?tag=one&tag=two&tag=three` the gateway delivers two different
+views, and both survive normalization:
+
+- `queryStringParameters.tag === "one,two,three"` — repeated values
+  comma-joined;
+- `multiValueParameters.tag === ["one", "two", "three"]` — value lists.
+
+Nest's `@Query("tag")` parses the canonical query string and returns
+`["one", "two", "three"]`. The verbatim gateway views stay accessible through
+the raw event escape hatch (below); they are never merged into each other.
+
+### Responses
+
+Handlers return values normally; the connector serializes them into the
+Yandex Function response envelope:
+
+- explicit content types always win; implicit defaults are `application/json`
+  for objects, `text/plain; charset=utf-8` for strings and
+  `application/octet-stream` for buffers;
+- `Buffer` bodies are sent Base64-encoded (`isBase64Encoded: true`);
+- single-valued headers go to `headers`; repeated values (typically multiple
+  `Set-Cookie` appends) move to the optional `multiValueHeaders` map instead of
+  being lossily comma-joined. That field is live-verified against the real
+  API Gateway response path: the gateway joins repeated ordinary headers into
+  one wire line but emits repeated `Set-Cookie` values as separate header
+  lines.
+
+### Errors
+
+HTTP exceptions are first-class NestJS territory: `HttpException` responses
+keep their exact status code and body, exception filters and interceptors stay
+in charge. An unexpected failure becomes one static opaque envelope
+(`{"statusCode":500,"message":"Internal server error"}`) — no stack frames,
+error messages or request values reach the client. Unmatched requests hit the
+normal Nest not-found handling. A failing invocation never affects the next
+warm one.
+
+## Execution context: `@YandexContext()`
+
+Inject the normalized invocation context into any controller/service method or
+queue handler parameter:
 
 ```ts
-import { Injectable } from "@nestjs/common";
+import { Controller, Get } from "@nestjs/common";
 import { YandexContext } from "@ycforge/ycsf-nestjs-connector";
 import type { YandexExecutionContext } from "@ycforge/ycsf-nestjs-connector";
 
-@Injectable()
-export class OrdersService {
-  handle(@YandexContext() executionContext: YandexExecutionContext) {
-    // Stable per-invocation correlation id (identical for HTTP and MQ).
-    executionContext.awsRequestId;
-    // Trace metadata preserved verbatim.
-    executionContext.uberTraceId;
-    // Escape hatches: untouched raw event/context.
-    executionContext.rawEvent;
-    executionContext.raw;
+@Controller("probe")
+export class ProbeController {
+  @Get()
+  probe(@YandexContext() yandex: YandexExecutionContext): object {
+    return {
+      invocationId: yandex.awsRequestId, // stable cross-transport correlation id
+      functionName: yandex.functionName,
+    };
   }
 }
 ```
 
-The context is scoped to a single invocation and never shared between them.
-Its IAM token (`executionContext.token`) is a secret: automatic serialization
-(`JSON.stringify`) redacts it to `REDACTED_TOKEN` and excludes the raw
-payloads, so accidental logging cannot leak credentials.
+Available fields include `awsRequestId` (the correlation id shared by HTTP and
+Message Queue invocations), `functionName`, `functionVersion`,
+`functionFolderId`, `memoryLimitInMB` (kept verbatim as a string),
+`deadlineMs` (epoch milliseconds), `logGroupName`, optional `token` and
+`uberTraceId`, plus two escape hatches: `rawEvent` (the untouched API Gateway
+v2 event or Message Queue delivery) and `raw` (the entire runtime context,
+including undocumented fields).
 
-### Safe diagnostics vs raw access
+Security-sensitive values: `token` (IAM token of the function's service
+account), `Authorization`/`Cookie` headers inside raw events and client IP
+data (`sourceIp`, forwarded headers) must never be logged. Automatic
+serialization protects you by default — `JSON.stringify(context)` replaces the
+token with `REDACTED_TOKEN` and omits the raw payloads entirely. For your own
+diagnostics use [`safeDiagnostics`](#safe-diagnostics-vs-raw-access).
 
-Raw escape hatches (`raw`, `rawEvent`, direct property access) are exact,
-intentionally unsafe references — they carry the IAM token, client credentials
-and unredacted personal data, and the connector never logs them. When you need
-to log or snapshot invocation data yourself, route it through `safeDiagnostics`
-instead of serializing raw structures directly:
+## Safe diagnostics vs raw access
+
+Raw escape hatches (`raw`, `rawEvent`, direct property access) are exact and
+intentionally unsafe references — they carry credentials and unredacted
+personal data. When you log or snapshot invocation data yourself, route it
+through `safeDiagnostics` instead of serializing raw structures directly:
 
 ```ts
 import { safeDiagnostics } from "@ycforge/ycsf-nestjs-connector";
 
-console.log(JSON.stringify(safeDiagnostics({ message: "handled", ctx: context })));
+console.log(JSON.stringify(safeDiagnostics({ stage: "done", context })));
 ```
 
 `safeDiagnostics(value)` returns a redacted, JSON-safe copy (input is never
-mutated):
+mutated): tokens become `REDACTED_TOKEN`, credential headers and client IPs in
+recognized header maps become placeholders, queue bodies/deserialized payloads
+stay out, errors collapse to `{ name }` (+ stable codes), getters such as lazy
+`payload` are never evaluated. It is a diagnostics aid, not a security
+framework — your own error messages remain your responsibility.
 
-- `token` is replaced with `REDACTED_TOKEN` on the serialized root and on any
-  nested value shaped like the runtime context; ordinary application fields
-  named `token` elsewhere pass through untouched.
-- Header maps lose credentials and client IPs: `Authorization`, `Cookie`,
-  `X-Forwarded-For`, `X-Envoy-External-Address`, `X-Real-Remote-Address`
-  become placeholders, while correlation ids (`X-Request-Id`, trace ids) stay
-  verbatim for observability. `sourceIp` is redacted at any depth. Entries in
-  gateway parameter maps named like cookies/authorization are placeholdered as
-  well (the gateway duplicates declared cookies there).
-- Queue payloads stay out: normalized queue messages serialize to identity,
-  checksums, metadata and attribute names — never bodies, deserialized
-  payloads or attribute values; raw API Gateway v2 events and raw MQ wire
-  messages drop their `body`.
-- Errors collapse to `{ name }` (plus `code`/`transportId` for
-  `ConnectorError`): messages, stacks and cause chains may quote request data
-  and are omitted.
-- Getters are never evaluated (lazy payloads such as `QueueMessage.payload`
-  are neither computed nor leaked), cycles terminate deterministically, and
-  output is stable under `JSON.stringify`.
+## Message Queue consumers
 
-This is a diagnostics aid, not a security framework: your own error messages
-and business data remain your responsibility, and `rawQueryString` is passed
-through unparsed by design.
-
-The built-in registry currently ships with the HTTP / API Gateway v2 transport
-(#5, #6): `version: "2.0"` events are detected, structurally validated,
-normalized (canonical `rawPath`/`rawQueryString`, both query-parameter views,
-`isBase64Encoded`-driven body decoding) and published to the invocation scope.
-Controllers then dispatch through the warm Nest application: guards,
-interceptors, pipes, filters, `@Res()` escape hatches and standard
-`HttpException` mapping behave as on any other platform — the connector's
-adapter only records what Nest registers and replays it per invocation, it
-does not reimplement framework semantics. Responses serialize back to the
-Yandex Function envelope: explicit handler-set content types always win
-(implicit defaults are `application/json`, `text/plain; charset=utf-8`,
-`application/octet-stream`), `Buffer` bodies become Base64
-(`isBase64Encoded: true`) so binary data is never corrupted, and repeated
-header values (e.g. multiple `Set-Cookie`) surface under the optional
-`multiValueHeaders` field. That field is **live-verified** against the API
-Gateway payload-format-2.0 response path: the gateway accepts it, joins
-repeated ordinary headers with commas on the wire, and emits repeated
-`Set-Cookie` values as separate header lines (see `src/http/response.ts`).
-Message Queue deliveries are detected by the built-in registry as well
-(#7): events carrying the observed `messages[]` trigger shape are
-structurally validated, normalized into a batch of typed message envelopes
-(event metadata, queue id, message identity, verbatim system and user
-attributes, checksums, opaque raw body, untouched raw references) and
-published to the invocation scope. Queue handlers are plain NestJS providers
-or controllers whose methods carry `@QueueHandler()` (#8): every discovered
-handler receives every delivered message, sequentially in delivery order,
-with `@QueueMessage()` injecting the current message and `@YandexContext()`
-the invocation context. Handler instances resolve once per message under a
-DI sub-tree created for that message: `DEFAULT` providers stay singletons,
-`REQUEST` providers are fresh per message yet consistent across every
-handler call of that message, and `TRANSIENT` ones refresh per message.
-Failures — malformed deliveries, missing queue
-handlers (`NO_QUEUE_HANDLER`) as well as handler errors — propagate out of
-the invocation so Message Queue retry/dead-letter configuration stays
-effective; deliveries no transport claims reject with `ConnectorError` code
-`UNKNOWN_INVOCATION_EVENT`. Environments requiring graceful teardown can call
-`handler.close()` to release the cached application; the next invocation
-cold-starts again.
-
-### Message Queue handlers
+Queue handlers are ordinary providers (or controllers) whose methods carry
+`@QueueHandler()`. There is no separate bootstrap: the same
+`createYandexHandler(AppModule)` serves queue triggers.
 
 ```ts
 import { Injectable } from "@nestjs/common";
-import {
-  QueueHandler,
-  QueueMessage,
-  YandexContext,
-  type QueueMessage as YandexQueueMessage,
-  type YandexExecutionContext,
-} from "@ycforge/ycsf-nestjs-connector";
+import { QueueHandler, QueueMessage, YandexContext } from "@ycforge/ycsf-nestjs-connector";
+import type { YandexExecutionContext } from "@ycforge/ycsf-nestjs-connector";
 
 interface OrderEvent {
   orderId: string;
-  items: number;
 }
 
 @Injectable()
 export class OrdersConsumer {
-  // Every @QueueHandler() method receives EVERY delivered message; a batch
-  // runs sequentially in delivery order. QueueMessage<T> types the decoded
-  // payload; the raw body stays available beside it.
   @QueueHandler()
-  consume(
-    @QueueMessage() message: YandexQueueMessage<OrderEvent>,
-    @YandexContext() executionContext: YandexExecutionContext,
+  handle(
+    @QueueMessage() message: QueueMessage<OrderEvent>,
+    @YandexContext() yandex: YandexExecutionContext,
   ): void {
-    executionContext.awsRequestId; // cross-transport correlation id
-    message.payload.orderId; // deserialized application payload (see below)
-    message.body; // exact raw body string, always preserved
-    message.attributes; // verbatim system attributes
-    message.messageAttributes; // camelCase user attributes, lossless strings
-    message.raw; // untouched raw trigger envelope (escape hatch)
+    this.processOrder(message.payload); // deserialized application payload
+    this.auditDelivery(yandex.awsRequestId, message.messageId, message.body);
   }
+
+  private processOrder(order: OrderEvent): void {}
+
+  /** Raw body access stays available beside the typed payload. */
+  private auditDelivery(invocationId: string, messageId: string, rawBody: string): void {}
 }
 ```
 
-A failing handler fails the whole invocation so retries and dead-letter
-queues keep working. A delivery that reaches an application without any
-`@QueueHandler()` registration fails with `ConnectorError` code
-`NO_QUEUE_HANDLER` instead of being silently acknowledged.
+### Delivery model
 
-#### Body payloads and message attributes
+- A delivery is modeled as a batch: `messages[]`. The current trigger
+  configuration groups one message per invocation (**observed**), but nothing
+  in the domain model hard-codes that limit — consumers are batch-ready.
+- Every discovered `@QueueHandler()` method receives **every** delivered
+  message, sequentially in delivery order (fan-out). Return values are ignored:
+  a queue delivery has no response envelope.
+- Batch processing is fail-fast: the first failure rejects the whole
+  invocation immediately and later messages are not attempted in that
+  invocation. Redelivery after a failure is decided by the platform's retry
+  configuration (at-least-once semantics); deduplicate in your consumer if
+  reprocessing matters.
+- Provider scopes behave exactly like one platform request per message:
+  `DEFAULT` providers keep their warm-process singleton across all
+  invocations, `REQUEST` providers get a fresh instance per message that stays
+  consistent across every handler call of that message, and `TRANSIENT`
+  providers refresh at every injection point.
 
-`QueueMessage` keeps three representation levels apart:
+A failing handler fails the whole invocation — deliberately, so Message Queue
+retry/dead-letter configuration stays effective. A delivery reaching an
+application without any registered `@QueueHandler()` fails with
+`ConnectorError` code `NO_QUEUE_HANDLER` instead of being silently
+acknowledged.
 
-- **Raw** — `body` (the exact delivered string) and everything under `raw`.
-- **Normalized** — identity, checksums, attributes and metadata in their
-  observed forms; strings stay strings.
-- **Payload** — `message.payload`, decoded on first access by the configured
-  strategy and memoized per message.
+### Payloads: raw, normalized, deserialized
 
-Default policy is strict JSON: valid JSON becomes exactly what `JSON.parse`
-produces (no Date revival, no numeric rewriting); anything else — plain
-text, empty or malformed bodies — fails deterministically with
-`ConnectorError` code `QUEUE_BODY_DESERIALIZATION_FAILED` inside the handler
-round that reads it. Nothing is parsed for messages nobody consumes, and a
-bad body never corrupts normalization of the rest of the delivery. Queues
-that do not carry JSON stay fully usable through `body`, or through an
-explicit custom deserializer:
+Three representation levels coexist on every message and are kept strictly
+apart:
+
+1. **Raw** — `message.body`, the exact delivered string, plus everything under
+   `message.raw` and `batch.raw`.
+2. **Normalized** — identity (`messageId`), checksums (`md5OfBody`),
+   system/user attributes and delivery metadata in their observed forms.
+   Strings stay strings: timestamps keep their ISO form, attribute values keep
+   their exact form (`{ dataType, stringValue }` — Number-typed values are not
+   coerced, converting them is your deliberate step), unknown future fields
+   flow through untouched.
+3. **Deserialized** — `message.payload`, typed as `QueueMessage<T>`'s generic.
+
+Payload deserialization is **lazy and memoized**: nothing is parsed during
+normalization, the configured strategy runs on the first read of `payload`,
+and the outcome is computed once per message and replayed afterwards — so
+handlers that only inspect metadata skip parsing entirely, and fan-out
+handlers observe one consistent payload.
+
+The default strategy is strict JSON: valid JSON becomes exactly what
+`JSON.parse` produces (no Date revival, no numeric rewriting). Anything else —
+plain text, empty or malformed bodies — raises `ConnectorError` code
+`QUEUE_BODY_DESERIALIZATION_FAILED` inside exactly the handler round that
+reads `payload`; `body` and `raw` stay usable throughout, so non-JSON queues
+remain fully accessible without any custom setup.
+
+Queues that do not carry JSON can install an explicit custom deserializer:
 
 ```ts
 const handler = createYandexHandler(AppModule, {
   queue: {
-    deserializeBody: (body: string) => protobuf.decode(Buffer.from(body, "utf8")),
+    deserializeBody: (body, message) => JSON.parse(body),
   },
 });
 ```
 
-The strategy receives `(body, message)` — its return value (including
-`undefined`) becomes `payload`, and its failures propagate verbatim like
-handler failures.
+The strategy receives `(body, message)` — the exact raw string plus the
+normalized message, so it can branch on attributes — and its return value
+(including `undefined`) becomes `payload`. Failures propagate verbatim into
+the consuming round, exactly like handler failures.
 
-Message attributes are never decoded: `{ dataType, stringValue }` preserves
-the original `string_value` exactly, Number-typed values keep their precise
-string form (conversion is your deliberate step), unknown future data types
-flow through unchanged, and `md5OfMessageAttributes` passes through
-verbatim.
-
-## Failure semantics
+## Error semantics
 
 Every invocation ends in a transport-shaped success or a transport-shaped
-failure. Failures fall into three explicit classes (full contract:
+failure. Failures belong to exactly one of three classes (full contract:
 [ARCHITECTURE.md §6](./docs/ARCHITECTURE.md#6-error-semantics)):
 
-1. **Transport / invocation validation.** Events no transport claims reject
-   with `ConnectorError` code `UNKNOWN_INVOCATION_EVENT` before any
-   initialization effort; claimed-but-malformed events reject with
-   `INVALID_INVOCATION_EVENT` before any application code runs.
-   `error instanceof ConnectorError` identifies an expected boundary error;
-   branch on its stable `code`, never on messages.
-2. **Message Queue payload deserialization.** A body that is not valid JSON
-   fails the consuming handler round with `QUEUE_BODY_DESERIALIZATION_FAILED`
-   (raw `body` and `raw` stay available); custom deserializer failures
-   propagate verbatim. Both fail the whole invocation under the same fail-fast
-   contract as handler errors.
-3. **Application handler failures** — never wrapped, never converted:
-   - **HTTP**: exceptions map through NestJS's own machinery — `HttpException`
-     responses keep their exact status code and body, exception filters and
-     interceptors stay in charge, and an unexpected failure becomes one static
-     opaque envelope (`{"statusCode":500,"message":"Internal server error"}`)
-     with no stack frames, exception text or echoed request values. A failing
-     invocation never affects the next warm invocation.
-   - **Message Queue**: failures propagate out of the function invocation —
-     deliberately, so Yandex Message Queue retry/dead-letter configuration can
-     operate; the connector never acknowledges a failed delivery by returning a
-     successful result. Batches run sequentially and fail fast: messages after
-     the first failure are not attempted, earlier successes are not replayed
-     inside the same invocation, and a successful delivery resolves to the
-     normalized batch — never an HTTP-style envelope. Manual acknowledgement,
-     deletion, retry counters and DLQ management are intentionally absent;
-     Yandex Message Queue owns those mechanics.
+| Class                         | Raised when                                                  | Behavior                                                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Invocation validation         | unknown/malformed events, unsupported route patterns         | `ConnectorError`: `UNKNOWN_INVOCATION_EVENT`, `INVALID_INVOCATION_EVENT`, `UNSUPPORTED_ROUTE_PATTERN` (the last fails cold start); before any user code |
+| Queue payload deserialization | invalid JSON read via `payload` (or custom strategy failure) | `QUEUE_BODY_DESERIALIZATION_FAILED` / original error, failing the consuming round                                                                       |
+| Application handler failure   | your controllers/services/consumers throw                    | never wrapped: HTTP maps through Nest semantics, Message Queue propagates out of the invocation                                                         |
 
-**Bootstrap failures:** if Nest initialization fails, the invocation rejects
-with the original error (never a falsely successful response), every
-concurrent caller of that cold start observes the same failure, the next
-invocation retries initialization from scratch (failed cold starts are never
-cached), and `handler.close()` stays idempotent.
+`error instanceof ConnectorError` identifies an expected boundary error raised
+by this package; branch on its stable `code`, never on messages.
 
-**Diagnostic redaction:** connector diagnostics are value-free — field names,
-expected types, transport ids and route patterns only. Deserialization errors
-drop `JSON.parse` details because they can quote body fragments; automatic
-serialization of the execution context replaces the IAM token with
-`REDACTED_TOKEN` and excludes raw payloads; the connector itself logs nothing.
+Bootstrap failures behave sanely too: if Nest initialization fails, the
+invocation rejects with the original error (never a falsely successful
+response), concurrent cold-start callers observe the same failure, and the
+next invocation retries initialization from scratch.
 
-## Architecture
+## Cold starts, warm invocations and shutdown
 
-The design-of-record lives in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
-It covers the layering between the NestJS application layer and this
-package's internal transport/core layers, the public API surface and its
-visibility rules, invocation detection, cold/warm lifecycle expectations,
-per-transport error semantics, raw-data preservation guarantees, and the
-extension points for future transports.
+- First invocation performs the full Nest initialization; concurrent cold
+  starts share one initialization promise instead of building duplicate
+  applications.
+- Warm invocations reuse the cached application — Nest is never re-created per
+  invocation, while all per-invocation data stays isolated between requests.
+- Environments requiring graceful teardown call `handler.close()`: idempotent,
+  safe before the first invocation, releases the cached application so the
+  next invocation cold-starts fresh. Otherwise the application simply lives as
+  long as the warm execution environment.
 
-Source layout:
+## Local development and replay
 
-| Directory         | Visibility | Responsibility                                                                |
-| ----------------- | ---------- | ----------------------------------------------------------------------------- |
-| `src/index.ts`    | Public     | The only entry point; deliberate export surface                               |
-| `src/core/`       | Mixed      | Transport SPI contracts; runtime internals (#3)                               |
-| `src/http/`       | Mixed      | Public HTTP contracts; adapter behavior (#5, #6)                              |
-| `src/mq/`         | Mixed      | Public queue contracts; adapter behavior (#7, #8)                             |
-| `src/context/`    | Mixed      | Context contract + decorator (#4); internals                                  |
-| `src/decorators/` | Public     | Decorator signatures; queue implementations (#8)                              |
-| `src/testing/`    | Internal   | Test-only fixture loader + local replay tool (#11, #12); excluded from `dist` |
+Application code stays testable with plain NestJS tooling — controllers and
+consumers neither know nor care that Yandex exists. To exercise the full
+runtime locally (warm caching, transport detection, normalization, failure
+semantics), the repository ships a replay CLI that runs sanitized conformance
+fixtures through the same public `createYandexHandler()` entry point — with no
+Yandex Cloud connectivity, credentials or network access:
 
-Per-module visibility tiers and the explicit list of public exports are in
-[ARCHITECTURE.md §2 and §7](./docs/ARCHITECTURE.md#7-public-api-surface).
+```bash
+git clone https://github.com/ycforge/ycsf-nestjs-connector.git
+cd ycsf-nestjs-connector
+npm ci
 
-## Requirements
+npm run replay -- --http-all --mq-all          # every committed fixture
+npm run replay -- --mq json-body-message       # one fixture by name
+npm run replay -- --module ./dist/my-app.module.js --mq my-scenario.json
+```
 
-- Node.js >= 22 (development and CI are pinned to one reproducible 22.x minor
-  via [.nvmrc](./.nvmrc))
-- Peer dependencies: `@nestjs/common`, `@nestjs/core` (^11)
-- Versioning and compatibility: the public API stability rules, semver
-  classification of changes, deprecation procedure, Yandex runtime-change
-  handling and supported environment matrix are defined in
-  [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md)
+`--module` points at a compiled JS file exporting your `AppModule`, so your own
+application replays against recorded-shape events. Exit code `0` means every
+selected fixture succeeded; CLI output is deliberately value-free (fixture
+names, status codes, fixed error categories only).
 
-## Development
+The fixtures are sanitized reconstructions derived from captured evidence of
+real Yandex invocations — not literal production dumps; sensitive values are
+deterministic placeholders (provenance rules: [fixtures/README.md](./fixtures/README.md)).
+They double as templates for driving your own local tests: feed a fixture's
+raw `event`/`context` objects straight into the exported handler.
+
+Full details: [docs/REPLAY.md](./docs/REPLAY.md).
+
+## Documentation map
+
+| Document                                         | Contents                                                               |
+| ------------------------------------------------ | ---------------------------------------------------------------------- |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)   | Layering, public API surface, lifecycle, transport and error contracts |
+| [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) | Semver policy, supported environments, stability guarantees            |
+| [docs/REPLAY.md](./docs/REPLAY.md)               | Replay CLI and programmatic replay API                                 |
+| [DATA-ANALYSE.md](./DATA-ANALYSE.md)             | Evidence base of observed Yandex runtime behavior                      |
+| [fixtures/README.md](./fixtures/README.md)       | Fixture provenance, sanitization and scenario index                    |
+| [AGENTS.md](./AGENTS.md)                         | Repository rules for contributors                                      |
+
+## Development (this repository)
 
 ```bash
 npm install        # install toolchain
@@ -328,36 +433,20 @@ npm run typecheck  # tsc --noEmit
 npm test           # jest
 npm run build      # emit dist/ with declarations
 npm run package:check
-# validate the packed tarball: publishable file set plus standalone
-# consumption through the public entry point only (runtime and type level)
+# packs the tarball and proves it contains only built output plus metadata,
+# consumed standalone through the public entry point
 npm run replay -- --http-all --mq-all
 # locally replay the sanitized conformance fixtures through
-# createYandexHandler(); see docs/REPLAY.md (issue #12)
+# createYandexHandler(); see docs/REPLAY.md
 ```
 
-### Continuous integration and release preparation
-
-Every pull request — including PRs against intermediate stacked feature
-branches — and every push to `main` runs the identical sequence in GitHub
-Actions on the Node.js version pinned in [.nvmrc](./.nvmrc) (issue #15):
-
-1. dependency installation (`npm ci`);
-2. lint, format check, typecheck, tests, build;
-3. package validation (`npm run package:check`) — packs the real npm tarball
-   and proves it contains only built output plus metadata (no sources, tests,
-   fixtures, replay tooling or credentials), then installs and consumes that
-   exact artifact standalone at runtime and type level through the public
-   entry point ([scripts/validate-package.mjs](./scripts/validate-package.mjs)).
-
-Tagging a commit with `v*` triggers the **release preparation** workflow: the
-tagged commit passes the same gates from a clean checkout and the packed
-tarball is stored as a workflow artifact for inspection. Publishing to npm is
-deliberately not automated yet; when introduced it must use a secure mechanism
-(GitHub Actions secrets or OIDC-based trusted publishing), never credentials
-stored in this repository.
-
-See [AGENTS.md](./AGENTS.md) for the full set of repository rules (transport
-boundaries, security, testing policy, commit conventions).
+Every pull request and every push to `main` runs the identical sequence in
+GitHub Actions on the Node.js version pinned in [.nvmrc](./.nvmrc): install,
+lint, format check, typecheck, tests, build, package validation. Tagging a
+commit with `v*` triggers release preparation — the packed tarball is stored
+as a workflow artifact for inspection; publishing to npm is deliberately not
+automated yet and must only ever be introduced with a secure publishing
+mechanism.
 
 ## License
 
