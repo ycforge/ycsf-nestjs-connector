@@ -313,6 +313,10 @@ Per-module visibility tiers and the explicit list of public exports are in
 - Node.js >= 22 (development and CI are pinned to one reproducible 22.x minor
   via [.nvmrc](./.nvmrc))
 - Peer dependencies: `@nestjs/common`, `@nestjs/core` (^11)
+- Versioning and compatibility: the public API stability rules, semver
+  classification of changes, deprecation procedure, Yandex runtime-change
+  handling and supported environment matrix are defined in
+  [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md)
 
 ## Development
 
