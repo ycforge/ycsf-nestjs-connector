@@ -16,6 +16,7 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  Res,
   RequestMethod,
   Scope,
   UseFilters,
@@ -30,6 +31,7 @@ import { map, type Observable } from "rxjs";
 import { YandexContext } from "../context/yandex-context.decorator";
 import type { YandexExecutionContext } from "../context/yandex-execution-context";
 import type { NormalizedHttpRequest } from "../http/normalized-request";
+import type { YandexHttpResponseFacade } from "../http/response-facade";
 import type { QueueMessage } from "../mq/message";
 import type { RawQueueEvent, RawQueueMessageEvent } from "../mq/raw-event";
 import { QueueHandler } from "../mq/queue-handler.decorator";
@@ -77,6 +79,11 @@ export interface QueueRoundObservation {
   readonly awsRequestId?: string;
   /** Instance id of the REQUEST-scoped MessageClockService seen this round. */
   readonly clockInstanceId?: number;
+  /**
+   * Instance id of the TRANSIENT-scoped MessageStampService seen this round:
+   * fresh per injection-point resolution even inside one message sub-tree.
+   */
+  readonly stampInstanceId?: number;
   /** Instance id of the DEFAULT-scoped WarmSingletonService seen this round. */
   readonly singletonInstanceId?: number;
   /** Decoded payload reference when the handler read `message.payload`. */
@@ -105,6 +112,7 @@ export function resetLifecycleObservations(): void {
 // ---------------------------------------------------------------------------
 
 let clockInstanceCounter = 0;
+let stampInstanceCounter = 0;
 let singletonInstanceCounter = 0;
 
 /**
@@ -115,6 +123,16 @@ let singletonInstanceCounter = 0;
 @Injectable({ scope: Scope.REQUEST })
 class MessageClockService {
   readonly instanceId = ++clockInstanceCounter;
+}
+
+/**
+ * TRANSIENT-scoped: a fresh instance per injection-point resolution. Within
+ * one message sub-tree every consumer still gets its own instance — the
+ * third Nest lifecycle the E2E fan-out app pins (issue #14).
+ */
+@Injectable({ scope: Scope.TRANSIENT })
+class MessageStampService {
+  readonly instanceId = ++stampInstanceCounter;
 }
 
 /** DEFAULT-scoped: stays the same instance until the application is released. */
@@ -216,6 +234,41 @@ class LifecycleController {
     };
   }
 
+  /**
+   * Reports every query representation side by side: what Nest's `@Query()`
+   * parsed from the canonical `rawQueryString`, plus the verbatim gateway
+   * fields read through the `@YandexContext()` raw-event escape hatch.
+   */
+  queryRepresentations(
+    parsedSingle: unknown,
+    parsedRepeated: unknown,
+    executionContext: YandexExecutionContext,
+  ): object {
+    const gatewayEvent = executionContext.rawEvent as {
+      queryStringParameters?: Record<string, string>;
+      multiValueParameters?: Record<string, string[]>;
+    };
+    return {
+      parsedSingle,
+      parsedRepeated,
+      gatewayFolded: gatewayEvent.queryStringParameters?.repeated ?? null,
+      gatewayMulti: gatewayEvent.multiValueParameters?.repeated ?? null,
+    };
+  }
+
+  /**
+   * Builds an envelope through the response facade only: one custom flat
+   * header, two appended Set-Cookie values, no body — proving the wire
+   * envelope splits single-value and repeated headers correctly.
+   */
+  headerEnvelope(responseFacade: YandexHttpResponseFacade): void {
+    responseFacade.setHeader("X-Custom-Trace", "trace-e2e-1");
+    responseFacade.appendHeader("Set-Cookie", "session=42; Path=/");
+    responseFacade.appendHeader("Set-Cookie", "theme=dark; Path=/; Secure");
+    responseFacade.status(204);
+    responseFacade.end();
+  }
+
   filtered(): never {
     throw new StackProbeError(UNEXPECTED_FAILURE_MARKER);
   }
@@ -289,6 +342,24 @@ Get("failures/unexpected")(
   lifecycleDescriptor("unexpectedFailure"),
 );
 
+Get("queries")(
+  LifecycleController.prototype,
+  "queryRepresentations",
+  lifecycleDescriptor("queryRepresentations"),
+);
+Query("single")(LifecycleController.prototype, "queryRepresentations", 0);
+Query("repeated")(LifecycleController.prototype, "queryRepresentations", 1);
+YandexContext()(LifecycleController.prototype, "queryRepresentations", 2);
+
+// Distinct literal prefixes (`queries`/`headers` vs `whoami/:name`) mean no
+// first-match-wins interaction with the parameterized route above.
+Get("headers")(
+  LifecycleController.prototype,
+  "headerEnvelope",
+  lifecycleDescriptor("headerEnvelope"),
+);
+Res({ passthrough: true })(LifecycleController.prototype, "headerEnvelope", 0);
+
 class FullStackHttpModule {
   configure(consumer: MiddlewareConsumer): void {
     consumer
@@ -313,6 +384,7 @@ export const FullStackHttpAppModule: Type<unknown> = FullStackHttpModule;
 
 interface ConsumerDependencies {
   readonly clock: MessageClockService;
+  readonly stamp: MessageStampService;
   readonly singleton: WarmSingletonService;
 }
 
@@ -328,6 +400,7 @@ function recordRound(
     messageId: message.messageId,
     awsRequestId: executionContext.awsRequestId,
     clockInstanceId: dependencies.clock.instanceId,
+    stampInstanceId: dependencies.stamp.instanceId,
     singletonInstanceId: dependencies.singleton.instanceId,
     payloadReference: message.payload,
     messageReference: message,
@@ -338,11 +411,15 @@ function recordRound(
 class AuditConsumer {
   private readonly dependencies: ConsumerDependencies;
 
-  constructor(clock: MessageClockService, singleton: WarmSingletonService) {
+  constructor(
+    clock: MessageClockService,
+    stamp: MessageStampService,
+    singleton: WarmSingletonService,
+  ) {
     // Compiled without emitDecoratorMetadata: constructor parameters are
     // declared to Nest through explicit self-decorated dependency positions
     // right after the class declaration.
-    this.dependencies = { clock, singleton };
+    this.dependencies = { clock, stamp, singleton };
   }
 
   handle(message: QueueMessage, executionContext: YandexExecutionContext): void {
@@ -350,7 +427,8 @@ class AuditConsumer {
   }
 }
 Inject(MessageClockService)(AuditConsumer, undefined, 0);
-Inject(WarmSingletonService)(AuditConsumer, undefined, 1);
+Inject(MessageStampService)(AuditConsumer, undefined, 1);
+Inject(WarmSingletonService)(AuditConsumer, undefined, 2);
 
 const auditHandleDescriptor = Object.getOwnPropertyDescriptor(AuditConsumer.prototype, "handle");
 if (!auditHandleDescriptor) {
@@ -364,8 +442,12 @@ YandexContext()(AuditConsumer.prototype, "handle", 1);
 class MirrorConsumer {
   private readonly dependencies: ConsumerDependencies;
 
-  constructor(clock: MessageClockService, singleton: WarmSingletonService) {
-    this.dependencies = { clock, singleton };
+  constructor(
+    clock: MessageClockService,
+    stamp: MessageStampService,
+    singleton: WarmSingletonService,
+  ) {
+    this.dependencies = { clock, stamp, singleton };
   }
 
   handle(message: QueueMessage, executionContext: YandexExecutionContext): void {
@@ -373,7 +455,8 @@ class MirrorConsumer {
   }
 }
 Inject(MessageClockService)(MirrorConsumer, undefined, 0);
-Inject(WarmSingletonService)(MirrorConsumer, undefined, 1);
+Inject(MessageStampService)(MirrorConsumer, undefined, 1);
+Inject(WarmSingletonService)(MirrorConsumer, undefined, 2);
 
 const mirrorHandleDescriptor = Object.getOwnPropertyDescriptor(MirrorConsumer.prototype, "handle");
 if (!mirrorHandleDescriptor) {
@@ -389,7 +472,13 @@ YandexContext()(MirrorConsumer.prototype, "handle", 1);
  */
 class FanOutQueueModule {}
 Module({
-  providers: [MessageClockService, WarmSingletonService, AuditConsumer, MirrorConsumer],
+  providers: [
+    MessageClockService,
+    MessageStampService,
+    WarmSingletonService,
+    AuditConsumer,
+    MirrorConsumer,
+  ],
 })(FanOutQueueModule);
 
 export const FanOutQueueAppModule: Type<unknown> = FanOutQueueModule;
@@ -429,7 +518,13 @@ export const PayloadAgnosticQueueAppModule: Type<unknown> = PayloadAgnosticQueue
 class CombinedTransportModule {}
 Module({
   controllers: [LifecycleController],
-  providers: [MessageClockService, WarmSingletonService, AuditConsumer, MirrorConsumer],
+  providers: [
+    MessageClockService,
+    MessageStampService,
+    WarmSingletonService,
+    AuditConsumer,
+    MirrorConsumer,
+  ],
 })(CombinedTransportModule);
 
 export const CombinedTransportAppModule: Type<unknown> = CombinedTransportModule;
@@ -468,6 +563,14 @@ export interface HttpEventOptions {
   /** JSON body: encoded exactly as the gateway does for application/json. */
   readonly jsonBody?: unknown;
   readonly headers?: Record<string, string>;
+  /**
+   * Verbatim gateway field (observed): repeated values comma-folded into
+   * single strings. Passed through untouched — the builder does not derive
+   * one representation from the other.
+   */
+  readonly queryStringParameters?: Record<string, string>;
+  /** Verbatim gateway field (observed): repeated values as lists. */
+  readonly multiValueParameters?: Record<string, string[]>;
 }
 
 /**
@@ -491,7 +594,6 @@ export function makeHttpEvent(options: HttpEventOptions = {}): RawHttpApiGateway
     rawPath: path,
     rawQueryString,
     headers,
-    queryStringParameters: {},
     requestContext: {
       authorizer: {},
       http: {
@@ -508,7 +610,8 @@ export function makeHttpEvent(options: HttpEventOptions = {}): RawHttpApiGateway
     isBase64Encoded,
     pathParameters: {},
     parameters: {},
-    multiValueParameters: {},
+    queryStringParameters: options.queryStringParameters ?? {},
+    multiValueParameters: options.multiValueParameters ?? {},
     operationId: FIXTURE_OPERATION_ID,
   };
 }
