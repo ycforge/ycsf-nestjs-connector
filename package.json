@@ -1,6 +1,6 @@
 {
   "name": "@ycforge/ycsf-nestjs-connector",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "NestJS adapter for Yandex Cloud Functions: API Gateway v2 HTTP transport and Message Queue trigger transport.",
   "author": "ycforge (https://github.com/ycforge)",
   "license": "MIT",
