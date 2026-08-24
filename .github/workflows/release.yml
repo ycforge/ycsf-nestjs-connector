@@ -1,0 +1,62 @@
+name: Release preparation
+
+# Prepares a reproducible release artifact from a clean checkout: the tagged
+# commit must pass the full quality-gate sequence, then the packed npm tarball
+# is uploaded for inspection. Publication is deliberately out of scope
+# (issue #15): this repository has no secure publishing mechanism yet, so no step
+# here may touch the npm registry. When automated publication is introduced it
+# must use GitHub Actions secrets or OIDC-based trusted publishing — never
+# credentials stored in the repository.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate package contents
+        run: npm run package:check
+
+      # `npm pack` re-runs the prepack build, so the tarball always reflects
+      # the exact validated source tree of the tagged commit.
+      - name: Pack release tarball
+        run: npm pack --pack-destination release-artifacts
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-tarball-${{ github.ref_name }}
+          path: release-artifacts/*.tgz
+          if-no-files-found: error
