@@ -58,7 +58,8 @@ NestJS/HTTP/queue abstractions.
 Visibility tiers:
 
 - **Public** — exported through `src/index.ts`; stable per semver (AGENTS.md
-  §19).
+  §19); the compatibility and versioning rules for this tier are defined in
+  [COMPATIBILITY.md](./COMPATIBILITY.md).
 - **Internal** — everything else. The `exports` map in `package.json` exposes
   only the `"."` subpath, so deep imports of `dist/**` are blocked by the
   package resolver; internal modules may change at any time.
@@ -688,6 +689,10 @@ this table: `src/index.spec.ts` and `EXPECTED_RUNTIME_EXPORTS` in
   frictionless consumption by NestJS toolchains.
 - Peer dependencies limited to `@nestjs/common` and `@nestjs/core` (^11);
   zero runtime dependencies otherwise (AGENTS.md §17).
+
+The compatibility, versioning and deprecation policy governing these targets —
+including how future Yandex, NestJS and Node.js changes are classified — lives
+in [COMPATIBILITY.md](./COMPATIBILITY.md).
 
 ## 10. Traceability
 
