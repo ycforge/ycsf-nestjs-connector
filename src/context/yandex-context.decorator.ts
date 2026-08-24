@@ -1,4 +1,6 @@
+import { createParamDecorator } from "@nestjs/common";
 import type { ContextParameterDecorator } from "../decorators/decorator-contracts";
+import { resolveInvocationExecutionContext } from "./invocation-scope";
 
 /**
  * Module-private registration of decorated parameter positions, keyed by
@@ -13,16 +15,28 @@ const registry = new WeakMap<object, Map<string | symbol | undefined, readonly n
  * (issue #4).
  *
  * The decorator is a thin registration mechanism (AGENTS.md section 3.4): it
- * only records which parameter positions want the context. The value is
- * supplied at invocation time by the transport dispatch, which reads it from
- * the invocation scope (`src/context/invocation-scope.ts`) — the same
- * transport-neutral source for HTTP and Message Queue executions.
+ * only records which parameter positions want the context. The value comes
+ * from the invocation scope (`src/context/invocation-scope.ts`) — the same
+ * transport-neutral source for HTTP and Message Queue executions:
+ *
+ * - Message Queue dispatch reads the module-private registry below and fills
+ *   the registered positions itself (issue #8), so no framework metadata is
+ *   involved on that path.
+ * - HTTP/API Gateway controller arguments are built by Nest's own route
+ *   proxies, which know nothing about connector registries; registered
+ *   positions are therefore ALSO exposed as a framework-native route
+ *   parameter whose factory pulls the context out of the active invocation
+ *   scope during argument resolution. Both paths hand user code the identical
+ *   frozen instance for one invocation (issue #14 E2E coverage).
  *
  * Parameter registration uses a module-private WeakMap registry instead of
  * reflect-metadata: the connector owns both ends (decoration and discovery),
- * so no global metadata namespace and no extra dependency is involved.
+ * so no global metadata namespace and no extra dependency is involved. The
+ * framework bridge uses `createParamDecorator` — Nest's supported extension
+ * point — never a second injection system.
  */
 export const YandexContext: ContextParameterDecorator = () => {
+  const routeParameter = createParamDecorator(() => resolveInvocationExecutionContext());
   return (target, propertyKey, parameterIndex) => {
     let indexesByProperty = registry.get(target);
     if (!indexesByProperty) {
@@ -38,6 +52,10 @@ export const YandexContext: ContextParameterDecorator = () => {
         [...existing, parameterIndex].sort((left, right) => left - right),
       );
     }
+
+    // Idempotent per position: repeated decoration of one parameter must not
+    // stack duplicate framework metadata entries.
+    routeParameter()(target, propertyKey, parameterIndex);
   };
 };
 
