@@ -27,7 +27,10 @@ independent of Yandex Cloud whenever practical.
 > built from sanitized fixtures reconstructed from captured Yandex invocations
 > (HTTP and Message Queue) guards the observed runtime contract end to end
 > (issue #11, [fixtures/](./fixtures)), and an explicit redaction policy for
-> diagnostic serialization ships as `safeDiagnostics` (issue #13). Observed
+> diagnostic serialization ships as `safeDiagnostics` (issue #13). End-to-end
+> lifecycle suites drive complete HTTP and Message Queue invocations — full
+> framework stacks, cold/warm/concurrent bootstrapping and cross-transport
+> isolation — through the public connector API (issue #14). Observed
 > Yandex Cloud runtime constraints that all connector code must respect are
 > catalogued in [AGENTS.md](./AGENTS.md).
 
@@ -46,10 +49,14 @@ export default { handler };
 
 ### Normalized execution context
 
-Handlers can access runtime metadata through `@YandexContext()` parameter
-injection instead of touching raw Yandex objects:
+Handlers and HTTP controllers can access runtime metadata through
+`@YandexContext()` parameter injection instead of touching raw Yandex objects.
+The injection works identically on both transports: queue dispatch fills
+registered positions directly, while HTTP route arguments resolve through
+Nest's native parameter mechanism backed by the same invocation scope.
 
 ```ts
+import { Injectable } from "@nestjs/common";
 import { YandexContext } from "@ycforge/ycsf-nestjs-connector";
 import type { YandexExecutionContext } from "@ycforge/ycsf-nestjs-connector";
 

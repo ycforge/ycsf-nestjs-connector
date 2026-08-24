@@ -170,9 +170,12 @@ AsyncLocalStorage scope (`src/context/invocation-scope.ts`). Consequences:
 - The context is transport-neutral: HTTP and Message Queue executions expose
   the identical abstraction, including the same correlation id
   (`awsRequestId`) and trace metadata.
-- `@YandexContext()` is a thin parameter registration; transports fill the
-  registered parameters from the invocation scope when dispatching to user
-  handlers (issues #5/#7/#8). Resolution outside an invocation fails loudly.
+- `@YandexContext()` is a thin parameter registration; queue dispatch fills
+  the registered positions from the invocation scope when dispatching to user
+  handlers (issue #8), while HTTP route arguments — built by Nest's own
+  proxies — resolve the same scope through a framework-native
+  `createParamDecorator` bridge registered alongside the connector registry
+  (issues #5/#14). Resolution outside an invocation fails loudly.
 - The scope state is the transports' extension slot: the claiming transport
   adds its normalized per-invocation models (the HTTP request since issue #5,
   the queue batch since issue #7) immutably before dispatch, and queue
