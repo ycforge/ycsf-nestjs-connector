@@ -310,7 +310,8 @@ Per-module visibility tiers and the explicit list of public exports are in
 
 ## Requirements
 
-- Node.js >= 22
+- Node.js >= 22 (development and CI are pinned to one reproducible 22.x minor
+  via [.nvmrc](./.nvmrc))
 - Peer dependencies: `@nestjs/common`, `@nestjs/core` (^11)
 
 ## Development
@@ -330,10 +331,29 @@ npm run replay -- --http-all --mq-all
 # createYandexHandler(); see docs/REPLAY.md (issue #12)
 ```
 
-Pull requests must pass lint, format check, typecheck, tests and build; CI runs
-the same sequence on Node.js 22. See [AGENTS.md](./AGENTS.md) for the full set
-of repository rules (transport boundaries, security, testing policy, commit
-conventions).
+### Continuous integration and release preparation
+
+Every pull request — including PRs against intermediate stacked feature
+branches — and every push to `main` runs the identical sequence in GitHub
+Actions on the Node.js version pinned in [.nvmrc](./.nvmrc) (issue #15):
+
+1. dependency installation (`npm ci`);
+2. lint, format check, typecheck, tests, build;
+3. package validation (`npm run package:check`) — packs the real npm tarball
+   and proves it contains only built output plus metadata (no sources, tests,
+   fixtures, replay tooling or credentials), then installs and consumes that
+   exact artifact standalone at runtime and type level through the public
+   entry point ([scripts/validate-package.mjs](./scripts/validate-package.mjs)).
+
+Tagging a commit with `v*` triggers the **release preparation** workflow: the
+tagged commit passes the same gates from a clean checkout and the packed
+tarball is stored as a workflow artifact for inspection. Publishing to npm is
+deliberately not automated yet; when introduced it must use a secure mechanism
+(GitHub Actions secrets or OIDC-based trusted publishing), never credentials
+stored in this repository.
+
+See [AGENTS.md](./AGENTS.md) for the full set of repository rules (transport
+boundaries, security, testing policy, commit conventions).
 
 ## License
 

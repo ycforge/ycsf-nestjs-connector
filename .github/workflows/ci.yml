@@ -1,23 +1,40 @@
 name: CI
 
+# The pull_request trigger is intentionally unfiltered: this repository uses
+# stacked feature branches whose PRs target intermediate bases rather than
+# main, and those PRs need exactly the same verification as direct-to-main
+# changes.
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # Actions are pinned to immutable commit SHAs so a moved version tag can
+      # never change what executes on this repository.
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          # Pinned from .nvmrc instead of the runner default: CI must test the
+          # same Node.js line developers use, not whatever the image ships.
+          node-version-file: .nvmrc
           cache: npm
 
+      # Every step below runs the exact script documented in README.md, so a
+      # local failure reproduces identically here — no CI-only commands.
       - name: Install dependencies
         run: npm ci
 
@@ -35,3 +52,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Packs the real npm tarball (not a directory copy) and proves it holds
+      # only intended runtime artifacts that standalone consumers can load at
+      # runtime and type level (scripts/validate-package.mjs).
+      - name: Validate package contents
+        run: npm run package:check
